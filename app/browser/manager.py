@@ -24,12 +24,17 @@ from ..windowing import (CHROMIUM_WINDOW_CLASSES, bring_window_to_front,
                          capture_window_snapshot)
 from .backends import (
     ACCOUNT_BROWSER_BACKENDS,
+    CLOAK_BROWSER_BACKEND,
     DEFAULT_BACKEND,
+    ENGINE_IDENTITY_BACKENDS,
     FINGERPRINT_CHROMIUM_BACKEND,
+    GLOBAL_BROWSER_BACKENDS,
     LOCAL_BACKEND,
     BrowserBackendUnavailableError,
+    CloakBrowserBackend,
     FingerprintChromiumBackend,
 )
+from .cloak_runtime import CloakBrowserError, CloakBrowserRuntime
 from .identity import Identity, fingerprint_script
 from .cdp import (CdpLaunchError, CdpProfileConflictError, CdpProxyError,
                   CdpProxyAuthController, XhsCdpBackend)
@@ -201,12 +206,20 @@ class BrowserManager:
                  native_write_require_verified_proxy: bool = True,
                  native_write_proxy_max_age_seconds: int = 86400,
                  browser_exit_probe_url: str = "https://ipinfo.io/json",
-                 browser_backend: str = LOCAL_BACKEND,
+                 browser_backend: str = CLOAK_BROWSER_BACKEND,
                  fingerprint_chromium_path: str = "",
                  fingerprint_chromium_allow_headless: bool = False,
                  fingerprint_chromium_platform: str = "auto",
                  fingerprint_chromium_runtimes: list[dict] | None = None,
-                 fingerprint_default_runtime_id: str = ""):
+                 fingerprint_default_runtime_id: str = "",
+                 cloak_browser_license_key: str = "",
+                 cloak_browser_cache_dir: str = "./data/cloakbrowser",
+                 cloak_browser_path: str = "",
+                 cloak_browser_allow_headless: bool = True,
+                 cloak_browser_platform: str = "auto",
+                 cloak_browser_release_channel: str = "stable",
+                 cloak_browser_version: str = "",
+                 cloak_browser_auto_download: bool = True):
         self.default_ua = default_ua
         self.profiles_root = profiles_root
         self.max_live = max(1, max_live)
@@ -235,12 +248,26 @@ class BrowserManager:
         self.native_write_proxy_max_age_seconds = max(
             0, int(native_write_proxy_max_age_seconds))
         self.browser_exit_probe_url = str(browser_exit_probe_url or "").strip()
-        requested_backend = str(browser_backend or LOCAL_BACKEND).strip().lower()
+        requested_backend = str(
+            browser_backend or CLOAK_BROWSER_BACKEND).strip().lower()
         self.default_browser_backend = (
             requested_backend
-            if requested_backend in {LOCAL_BACKEND, FINGERPRINT_CHROMIUM_BACKEND}
-            else LOCAL_BACKEND
+            if requested_backend in GLOBAL_BROWSER_BACKENDS
+            else CLOAK_BROWSER_BACKEND
         )
+        # CloakBrowser 是默认方案:内核由官方 wrapper 落地,Pro/GitHub 版的取舍
+        # 交给 CloakBrowserRuntime,这里只持有解析结果。
+        self.cloak_runtime = CloakBrowserRuntime(
+            license_key=cloak_browser_license_key,
+            cache_dir=cloak_browser_cache_dir,
+            executable_path=cloak_browser_path,
+            allow_headless=cloak_browser_allow_headless,
+            platform=cloak_browser_platform,
+            release_channel=cloak_browser_release_channel,
+            browser_version=cloak_browser_version,
+            auto_download=cloak_browser_auto_download,
+        )
+        self._cloak_backend = CloakBrowserBackend(self.cloak_runtime)
         self._fingerprint_backends: Dict[str, FingerprintChromiumBackend] = {}
         self._fingerprint_runtime_enabled: Dict[str, bool] = {}
         self.default_fingerprint_runtime_id = str(
@@ -281,6 +308,9 @@ class BrowserManager:
         self._backend_by_key: Dict[Any, str] = {}
         self._runtime_by_key: Dict[Any, str] = {}
         self._fallback_reason_by_key: Dict[Any, str] = {}
+        # 每次 Pro 内核启动对应一个"授权被拒绝"记录文件。并发超限是在 CDP 握手
+        # 之后才判定的,启动本身不报错,只能靠它事后说清原因。
+        self._cloak_denial_by_key: Dict[Any, str] = {}
         self._proxy_signature_by_key: Dict[Any, str] = {}
         self._profile_process_locks: Dict[Any, _ProfileProcessLock] = {}
         self._cdp_backend = None
@@ -369,6 +399,52 @@ class BrowserManager:
             raise BrowserBackendUnavailableError(backend.unavailable_reason)
         return backend
 
+    def effective_cloak_runtime_id(self, identity: Identity = None) -> str:
+        """CloakBrowser 的版本由 License 自动决定,账号不做绑定。
+
+        账号一旦被固定到 ``cloak-pro``,key 过期就会变成硬失败;用户要的语义是
+        "有效 key 用 Pro,否则倒退 GitHub 版",所以这里始终跟随当前解析结果。
+        Profile 目录随之分版本隔离 —— 146 的 Profile 不该被 151 写过的目录顶掉,
+        反向降级尤其危险,而登录态本身会从数据库 storage_state 重新桥接回来。
+        """
+        return self._cloak_backend.runtime_id
+
+    def effective_runtime_id(self, identity: Identity) -> str:
+        """账号当前生效的内核运行时 id;非内核级后端返回空串。"""
+        effective = self.effective_browser_backend(identity)
+        if effective == FINGERPRINT_CHROMIUM_BACKEND:
+            return self.effective_fingerprint_runtime_id(identity)
+        if effective == CLOAK_BROWSER_BACKEND:
+            return self.effective_cloak_runtime_id(identity)
+        return ""
+
+    async def _ensure_engine_runtime(self, identity: Identity) -> None:
+        """内核级后端在启动前把内核准备好(必要时下载)。
+
+        绝对不能在持有 ``_cv_lock`` 时调用:首次解析要下载约 200MB。
+        """
+        if self.effective_browser_backend(identity) != CLOAK_BROWSER_BACKEND:
+            return
+        try:
+            await self.cloak_runtime.ensure_ready()
+        except CloakBrowserError as exc:
+            raise BrowserBackendUnavailableError(str(exc)) from exc
+        except Exception as exc:
+            raise BrowserBackendUnavailableError(
+                f"CloakBrowser 内核准备失败: {exc}") from exc
+
+    def _engine_backend_for(self, identity: Identity, *,
+                            require_available: bool = True):
+        """返回该账号生效的内核级后端(fingerprint_chromium / cloak_browser)。"""
+        effective = self.effective_browser_backend(identity)
+        if effective == CLOAK_BROWSER_BACKEND:
+            if require_available and not self._cloak_backend.available:
+                raise BrowserBackendUnavailableError(
+                    self._cloak_backend.unavailable_reason)
+            return self._cloak_backend
+        return self._fingerprint_backend_for(
+            identity, require_available=require_available)
+
     @staticmethod
     def _runtime_profile_dir(identity: Identity, runtime_id: str) -> Path:
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", runtime_id or "default")
@@ -376,19 +452,15 @@ class BrowserManager:
 
     def _environment_profile_dir(self, identity: Identity) -> Path:
         """Return the exact persistent directory that owns this environment."""
-        if self.effective_browser_backend(identity) == FINGERPRINT_CHROMIUM_BACKEND:
+        if self.effective_browser_backend(identity) in ENGINE_IDENTITY_BACKENDS:
             return self._runtime_profile_dir(
-                identity, self.effective_fingerprint_runtime_id(identity))
+                identity, self.effective_runtime_id(identity))
         return Path(identity.profile_dir)
 
     def _environment_check_signature(self, identity: Identity) -> str:
         effective = self.effective_browser_backend(identity)
-        runtime_id = (
-            self.effective_fingerprint_runtime_id(identity)
-            if effective == FINGERPRINT_CHROMIUM_BACKEND else ""
-        )
         return self._context_signature(
-            identity, effective, runtime_id,
+            identity, effective, self.effective_runtime_id(identity),
             self.proxy_signature(identity.proxy),
         )
 
@@ -408,7 +480,7 @@ class BrowserManager:
         next visible user session show the diagnostic page again.
         """
         effective = self.effective_browser_backend(identity)
-        enabled = effective == FINGERPRINT_CHROMIUM_BACKEND
+        enabled = effective in ENGINE_IDENTITY_BACKENDS
         base: Dict[str, Any] = {
             "enabled": enabled,
             "provider": "BrowserScan",
@@ -543,23 +615,30 @@ class BrowserManager:
         backend = self._backend_by_key.get(identity.key)
         if backend is None:
             effective = self.effective_browser_backend(identity)
-            if effective == FINGERPRINT_CHROMIUM_BACKEND:
-                backend = FINGERPRINT_CHROMIUM_BACKEND
+            if effective in ENGINE_IDENTITY_BACKENDS:
+                backend = effective
             else:
                 backend = "cdp" if self._uses_xhs_cdp(identity) else "patchright"
         is_cdp = backend == "cdp"
-        is_fingerprint = backend == FINGERPRINT_CHROMIUM_BACKEND
+        is_cloak = backend == CLOAK_BROWSER_BACKEND
+        is_engine = backend in ENGINE_IDENTITY_BACKENDS
         runtime_id = ""
         runtime_version = ""
         runtime_label = ""
-        fingerprint_backend = self._fingerprint_backend
-        if is_fingerprint:
+        engine_backend = self._fingerprint_backend
+        if is_cloak:
+            engine_backend = self._cloak_backend
+            runtime_id = self._runtime_by_key.get(
+                identity.key, self.effective_cloak_runtime_id(identity))
+            runtime_version = self._cloak_backend.version
+            runtime_label = self._cloak_backend.state.label
+        elif is_engine:
             runtime_id = self._runtime_by_key.get(
                 identity.key, self.effective_fingerprint_runtime_id(identity))
-            fingerprint_backend = self._fingerprint_backends.get(
+            engine_backend = self._fingerprint_backends.get(
                 runtime_id, self._fingerprint_backend)
-            runtime_version = fingerprint_backend.version
-            runtime_label = fingerprint_backend.label
+            runtime_version = engine_backend.version
+            runtime_label = engine_backend.label
         fallback_reason = self._fallback_reason_by_key.get(identity.key, "")
         # Diagnostics are user-facing, never a transport for debugger URLs or
         # proxy credentials.
@@ -575,37 +654,40 @@ class BrowserManager:
         fallback = bool(fallback_reason)
         backend_label = (
             "系统 Chrome · CDP" if is_cdp
-            else runtime_label if is_fingerprint
+            else runtime_label if is_engine
             else "Patchright Chromium · 回退" if fallback
             else "Patchright Chromium"
         )
         snapshot = {
             "browser": (
                 "chrome" if is_cdp
-                else "fingerprint-chromium" if is_fingerprint
+                else "cloakbrowser" if is_cloak
+                else "fingerprint-chromium" if is_engine
                 else (self._browser_channel or "chromium")
             ),
             "chrome_major": (
                 int(runtime_version.split(".", 1)[0])
-                if is_fingerprint and runtime_version.split(".", 1)[0].isdigit()
-                else None if is_fingerprint else self._chrome_major),
+                if is_engine and runtime_version.split(".", 1)[0].isdigit()
+                else None if is_engine else self._chrome_major),
             "headless": (
                 False if is_cdp
-                else bool(headless and fingerprint_backend.allow_headless)
-                if is_fingerprint else bool(headless)
+                else bool(headless and engine_backend.allow_headless)
+                if is_engine else bool(headless)
             ),
             "identity_mode": identity.identity_mode,
             "profile_dir": (str(self._runtime_profile_dir(identity, runtime_id))
-                            if is_fingerprint else identity.profile_dir),
+                            if is_engine else identity.profile_dir),
             "has_proxy": bool(str(identity.proxy or "").strip()),
             "backend": backend,
             "backend_label": backend_label,
             "fallback": fallback,
             "fallback_reason": fallback_reason,
         }
-        if is_fingerprint:
+        if is_engine:
             snapshot["runtime_id"] = runtime_id
             snapshot["runtime_version"] = runtime_version
+        if is_cloak:
+            snapshot["cloak_edition"] = self._cloak_backend.edition
         return snapshot
 
     def _sec_ch_ua_headers(self, ua: str) -> Optional[Dict[str, str]]:
@@ -649,9 +731,9 @@ class BrowserManager:
         ua = str(identity.ua or self.default_ua or "").strip()
         effective = self.effective_browser_backend(identity)
         major = 0
-        if effective == FINGERPRINT_CHROMIUM_BACKEND:
+        if effective in ENGINE_IDENTITY_BACKENDS:
             try:
-                backend = self._fingerprint_backend_for(
+                backend = self._engine_backend_for(
                     identity, require_available=False)
                 head = str(backend.version or "").split(".", 1)[0]
                 major = int(head) if head.isdigit() else 0
@@ -728,6 +810,17 @@ class BrowserManager:
                 "detail": "不支持的浏览器后端",
             }
         name = self.default_browser_backend if value == DEFAULT_BACKEND else value
+        if name == CLOAK_BROWSER_BACKEND:
+            state = self._cloak_backend.state
+            return {
+                "name": name,
+                "runtime_id": state.runtime_id,
+                "edition": state.edition,
+                "version": state.version,
+                "label": state.label,
+                "available": self._cloak_backend.available,
+                "detail": self._cloak_backend.unavailable_reason or state.detail,
+            }
         if name == FINGERPRINT_CHROMIUM_BACKEND:
             selected_id = str(runtime_id or self.default_fingerprint_runtime_id).strip()
             backend = self._fingerprint_backends.get(selected_id)
@@ -765,10 +858,43 @@ class BrowserManager:
             })
         return rows
 
+    def cloak_status(self) -> Dict[str, Any]:
+        """CloakBrowser 内核与 License 的完整状态(不含明文 key)。"""
+        return self.cloak_runtime.status()
+
+    async def prepare_cloak_runtime(
+            self, *, allow_download: Optional[bool] = None,
+            refresh_license: bool = False) -> Dict[str, Any]:
+        """校验 License 并按需落地内核。失败时把原因写进状态而不是抛出。"""
+        try:
+            await self.cloak_runtime.ensure_ready(
+                allow_download=allow_download, refresh_license=refresh_license)
+        except CloakBrowserError as exc:
+            status = self.cloak_runtime.status()
+            status["available"] = False
+            status["detail"] = str(exc)
+            return status
+        except Exception as exc:  # pragma: no cover - 下载/网络异常路径
+            status = self.cloak_runtime.status()
+            status["available"] = False
+            status["detail"] = f"CloakBrowser 内核准备失败: {exc}"
+            return status
+        return self.cloak_runtime.status()
+
     def backend_catalog(self) -> Dict[str, Any]:
+        cloak_status = self.backend_status(CLOAK_BROWSER_BACKEND)
         return {
             "default": self.default_browser_backend,
             "backends": [
+                {
+                    "name": CLOAK_BROWSER_BACKEND,
+                    "label": cloak_status.get("label")
+                    or self._cloak_backend.label,
+                    "available": cloak_status["available"],
+                    "detail": cloak_status["detail"],
+                    "edition": cloak_status.get("edition", ""),
+                    "version": cloak_status.get("version", ""),
+                },
                 {
                     "name": LOCAL_BACKEND,
                     "label": "本地 Patchright / 系统 Chrome",
@@ -784,6 +910,7 @@ class BrowserManager:
                         FINGERPRINT_CHROMIUM_BACKEND)["detail"],
                 },
             ],
+            "cloak": self.cloak_status(),
             "default_runtime_id": self.default_fingerprint_runtime_id,
             "runtimes": self.fingerprint_runtime_catalog(),
         }
@@ -829,7 +956,7 @@ class BrowserManager:
         """
         profile_dir = (
             cls._runtime_profile_dir(identity, runtime_id)
-            if effective_backend == FINGERPRINT_CHROMIUM_BACKEND
+            if effective_backend in ENGINE_IDENTITY_BACKENDS
             else Path(identity.profile_dir)
         )
         payload = {
@@ -925,18 +1052,18 @@ class BrowserManager:
         # Gate tests and queued task projections may pass a lightweight account
         # view, so resolving the backend must not require full profile fields.
         effective_backend = self.effective_browser_backend(account)
-        fingerprint_status = self.backend_status(
+        engine_status = self.backend_status(
             effective_backend,
             str(getattr(account, "browser_runtime_id", "") or ""))
-        if effective_backend == FINGERPRINT_CHROMIUM_BACKEND \
-                and not fingerprint_status["available"]:
-            return (
-                "write_env_blocked:开源指纹浏览器不可用:"
-                + str(fingerprint_status["detail"])
-            )
+        if effective_backend in ENGINE_IDENTITY_BACKENDS \
+                and not engine_status["available"]:
+            label = ("CloakBrowser 内核不可用:"
+                     if effective_backend == CLOAK_BROWSER_BACKEND
+                     else "开源指纹浏览器不可用:")
+            return "write_env_blocked:" + label + str(engine_status["detail"])
         if self.native_write_require_system_chrome \
                 and self._browser_channel != "chrome" \
-                and effective_backend != FINGERPRINT_CHROMIUM_BACKEND:
+                and effective_backend not in ENGINE_IDENTITY_BACKENDS:
             return "write_env_blocked:未检测到系统稳定版 Chrome 或可用指纹 Chromium"
         proxy = str(getattr(account, "proxy", "") or "").strip()
         if not proxy or not self.native_write_require_verified_proxy:
@@ -962,24 +1089,27 @@ class BrowserManager:
     async def _launch_persistent(self, identity: Identity, headless: bool = True
                                  ) -> BrowserContext:
         effective_backend = self.effective_browser_backend(identity)
-        fingerprint_backend = None
+        engine_backend = None
         runtime_id = ""
-        if effective_backend == FINGERPRINT_CHROMIUM_BACKEND:
-            fingerprint_backend = self._fingerprint_backend_for(identity)
-            runtime_id = fingerprint_backend.runtime_id
+        if effective_backend in ENGINE_IDENTITY_BACKENDS:
+            # context_for 已经预热过;直接调用 _launch_persistent 的路径
+            # (临时有头窗口、内核自检)在这里补上。重复调用命中缓存,不重复下载。
+            await self._ensure_engine_runtime(identity)
+            engine_backend = self._engine_backend_for(identity)
+            runtime_id = engine_backend.runtime_id
             pdir = self._runtime_profile_dir(identity, runtime_id)
         else:
             pdir = Path(identity.profile_dir)
         pdir.mkdir(parents=True, exist_ok=True)
         was_empty = not any(p.name != ".browser.lock" for p in pdir.iterdir())
-        if fingerprint_backend is not None and was_empty:
+        if engine_backend is not None and was_empty:
             self._seed_fingerprint_profile_preferences(pdir)
         self._acquire_profile_lock(identity, pdir)
         ua = self._normalize_ua(identity.ua or self.default_ua)
         fingerprint_plan = None
-        if effective_backend == FINGERPRINT_CHROMIUM_BACKEND:
+        if effective_backend in ENGINE_IDENTITY_BACKENDS:
             try:
-                fingerprint_plan = fingerprint_backend.launch_plan(
+                fingerprint_plan = engine_backend.launch_plan(
                     identity, requested_headless=headless)
             except BrowserBackendUnavailableError:
                 self._release_profile_lock(identity.key)
@@ -994,13 +1124,21 @@ class BrowserManager:
             kwargs["chromium_sandbox"] = True
         if fingerprint_plan is not None:
             kwargs["executable_path"] = fingerprint_plan.executable_path
-            # Fingerprint Chromium provides its own native automation surface.
-            # Patchright's Chromium default would otherwise add this switch,
-            # expose an unsupported-command-line warning, and make the first
-            # site navigation differ from a normal user-opened window.
-            kwargs["ignore_default_args"] = [
-                "--disable-blink-features=AutomationControlled",
-            ]
+            # 指纹内核自带原生的反自动化处理。Patchright/Playwright 默认追加的
+            # 这些开关反而会带出真实浏览器没有的命令行告警与特征,由启动计划
+            # 决定要屏蔽哪几个。
+            kwargs["ignore_default_args"] = list(
+                fingerprint_plan.ignore_default_args)
+            if fingerprint_plan.env:
+                # Patchright 的 env 是**替换**语义,启动计划已经带上完整环境。
+                kwargs["env"] = dict(fingerprint_plan.env)
+            # 无条件覆盖:Pro 降级成免费版后本次启动没有拒绝记录文件,残留上一次
+            # Pro 的路径会让免费内核的一次普通崩溃被误报成"并发用满"。
+            if fingerprint_plan.license_status_file:
+                self._cloak_denial_by_key[identity.key] = (
+                    fingerprint_plan.license_status_file)
+            else:
+                self._cloak_denial_by_key.pop(identity.key, None)
         elif self._browser_channel:
             kwargs["channel"] = self._browser_channel
         # Engine-level fingerprint runtimes own the entire identity surface;
@@ -1023,8 +1161,12 @@ class BrowserManager:
         proxy = _parse_proxy(identity.proxy)
         if fingerprint_plan is not None:
             args = list(fingerprint_plan.args)
-            args.append(
-                f"--window-size={int(identity.viewport_w)},{int(identity.viewport_h)}")
+            if fingerprint_plan.headless_viewport is None:
+                # 内核会按画像伪造 screen 尺寸,窗口必须落在它之内,否则
+                # outerWidth > screen.width 这种不可能的窗口本身就是特征。
+                window = (fingerprint_plan.window_size
+                          or (identity.viewport_w, identity.viewport_h))
+                args.append(f"--window-size={int(window[0])},{int(window[1])}")
             if proxy and str(identity.fp_webrtc_mode or "conceal") != "allow":
                 for item in _PROXY_WEBRTC_ARGS:
                     if item not in args:
@@ -1034,7 +1176,12 @@ class BrowserManager:
             if geo_permission == "deny":
                 args.append("--deny-permission-prompts")
             kwargs["args"] = args
-            kwargs["no_viewport"] = True
+            if fingerprint_plan.headless_viewport is not None:
+                # 旧内核的无头窗口尺寸不自洽,必须给固定视口而不是跟随窗口。
+                width, height = fingerprint_plan.headless_viewport
+                kwargs["viewport"] = {"width": width, "height": height}
+            else:
+                kwargs["no_viewport"] = True
             if geo_permission != "deny":
                 kwargs["geolocation"] = identity.geolocation
             if geo_permission == "allow":
@@ -1049,8 +1196,15 @@ class BrowserManager:
             kwargs["proxy"] = proxy
         try:
             ctx = await self._pw.chromium.launch_persistent_context(**kwargs)
-        except Exception:
+        except Exception as exc:
             self._release_profile_lock(identity.key)
+            if effective_backend == CLOAK_BROWSER_BACKEND:
+                # Pro 内核用退出码表达 License 拒绝(并发超限/过期),不翻译的话
+                # 用户只会看到 "browser closed" 这种无从下手的报错。
+                reason = (self.cloak_runtime.describe_launch_failure(str(exc))
+                          or self.cloak_denial_reason(identity.key))
+                if reason:
+                    raise BrowserBackendUnavailableError(reason) from exc
             raise
         with suppress(Exception):
             ctx.on("close", lambda *_: self._release_profile_lock(identity.key))
@@ -1135,6 +1289,7 @@ class BrowserManager:
         self._backend_by_key.pop(key, None)
         self._runtime_by_key.pop(key, None)
         self._fallback_reason_by_key.pop(key, None)
+        self._cloak_denial_by_key.pop(key, None)
         self._proxy_signature_by_key.pop(key, None)
         try:
             if session is not None and self._cdp_backend is not None:
@@ -1185,11 +1340,12 @@ class BrowserManager:
     async def context_for(self, identity: Identity) -> BrowserContext:
         """取(或惰性创建)账号专属常驻 context。"""
         key = identity.key
+        # 内核解析可能要下载约 200MB,必须在拿 _cv_lock **之前**做完:那把锁是
+        # 全 manager 共用的,握着它等下载会让所有账号的浏览器获取一起停摆。
+        await self._ensure_engine_runtime(identity)
         async with self._cv_lock:
             effective_backend = self.effective_browser_backend(identity)
-            runtime_id = (
-                self.effective_fingerprint_runtime_id(identity)
-                if effective_backend == FINGERPRINT_CHROMIUM_BACKEND else "")
+            runtime_id = self.effective_runtime_id(identity)
             plan = (self._xhs_proxy_plan(identity)
                     if identity.platform == "xhs"
                     else try_proxy_plan(identity.proxy))
@@ -1240,11 +1396,14 @@ class BrowserManager:
                     ctx = await self._launch_persistent(
                         identity, headless=(identity.platform != "xhs"))
                     self._backend_by_key[key] = (
-                        FINGERPRINT_CHROMIUM_BACKEND
-                        if effective_backend == FINGERPRINT_CHROMIUM_BACKEND
+                        effective_backend
+                        if effective_backend in ENGINE_IDENTITY_BACKENDS
                         else "patchright"
                     )
-                    if effective_backend == FINGERPRINT_CHROMIUM_BACKEND:
+                    if effective_backend in ENGINE_IDENTITY_BACKENDS:
+                        # CloakBrowser 的版本是启动时才最终确定的(Pro/GitHub 版
+                        # 取决于 License 解析),这里必须用落地后的实际运行时。
+                        runtime_id = self.effective_runtime_id(identity)
                         self._runtime_by_key[key] = runtime_id
                 self._contexts[key] = ctx
                 # Native/Fingerprint Chromium may fill ``identity.ua`` while
@@ -1292,12 +1451,20 @@ class BrowserManager:
                 await page.close()
 
     async def probe_fingerprint_runtime(
-            self, runtime_id: str, profile_root: str | Path) -> Dict[str, Any]:
+            self, runtime_id: str, profile_root: str | Path,
+            backend: str = "") -> Dict[str, Any]:
         """Launch one registered runtime with an isolated disposable profile."""
         if self._pw is None:
             raise RuntimeError("浏览器管理器尚未启动")
         runtime_id = str(runtime_id or "").strip()
-        status = self.backend_status(FINGERPRINT_CHROMIUM_BACKEND, runtime_id)
+        # CloakBrowser 的运行时 id 由内核版本自动派生,允许调用方只传它。
+        effective_backend = str(backend or "").strip().lower() or (
+            CLOAK_BROWSER_BACKEND if runtime_id.startswith("cloak-")
+            else FINGERPRINT_CHROMIUM_BACKEND)
+        if effective_backend == CLOAK_BROWSER_BACKEND:
+            await self.prepare_cloak_runtime()
+            runtime_id = self._cloak_backend.runtime_id
+        status = self.backend_status(effective_backend, runtime_id)
         if not status["available"]:
             raise BrowserBackendUnavailableError(str(status["detail"]))
         profile = Path(profile_root) / f"probe_{runtime_id}_{time.time_ns()}"
@@ -1305,8 +1472,9 @@ class BrowserManager:
             account_id=None,
             profile_dir=str(profile),
             identity_mode="native",
-            browser_backend=FINGERPRINT_CHROMIUM_BACKEND,
-            browser_runtime_id=runtime_id,
+            browser_backend=effective_backend,
+            browser_runtime_id=(
+                "" if effective_backend == CLOAK_BROWSER_BACKEND else runtime_id),
             fp_seed=f"runtime-probe-{runtime_id}",
         )
         context = None
@@ -1338,6 +1506,17 @@ class BrowserManager:
             with suppress(Exception):
                 shutil.rmtree(profile)
 
+    def cloak_denial_reason(self, key: Any) -> str:
+        """读取该账号最近一次 CloakBrowser Pro 授权拒绝的原因(读完即清)。
+
+        并发超限是握手之后才判定的:内核自己退出,Patchright 只会报
+        "target closed"。有这条记录才能告诉用户是并发用满而不是崩溃。
+        """
+        status_file = self._cloak_denial_by_key.get(key, "")
+        if not status_file:
+            return ""
+        return self.cloak_runtime.denial_reason(status_file)
+
     async def new_page(self, identity: Identity, block_media: bool = False):
         """从账号常驻 context 开一个新 page(可屏蔽图片/视频/字体)。用完请 page.close()。"""
         ctx = await self.context_for(identity)
@@ -1352,6 +1531,12 @@ class BrowserManager:
             detail = f"{type(exc).__name__}: {exc}".lower()
             if "targetclosed" not in detail and "has been closed" not in detail:
                 raise
+            # 浏览器"自己没了"也可能是 Pro 授权在握手后被拒(并发用满最常见)。
+            # 这种情况重启同一份 Profile 只会再被拒一次,不如直接说清原因。
+            denial = self.cloak_denial_reason(identity.key)
+            if denial:
+                await self.close_context(identity.key)
+                raise BrowserBackendUnavailableError(denial) from exc
             await self.close_context(identity.key)
             ctx = await self.context_for(identity)
             page = await ctx.new_page()

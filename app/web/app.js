@@ -118,14 +118,14 @@ function setFieldError(el, message = "") {
   if (error) error.remove();
   return true;
 }
-function toggleSecretInput(id, btn) {
+function toggleSecretInput(id, btn, label = "API Key") {
   const input = $(id);
   if (!input) return;
   const show = input.type === "password";
   input.type = show ? "text" : "password";
   if (btn) {
     btn.setAttribute("aria-pressed", show ? "true" : "false");
-    btn.setAttribute("aria-label", show ? "隐藏 API Key" : "显示 API Key");
+    btn.setAttribute("aria-label", (show ? "隐藏 " : "显示 ") + label);
   }
   input.focus({ preventScroll: true });
 }
@@ -1231,6 +1231,7 @@ function switchTab(name, pushHistory = false) {
   if (name === "collections") { populateCollectionAccount(); refreshCollections(); }
   if (name === "queue") refreshTaskQueue();
   if (name === "risk-control") refreshRiskCenter();
+  if (name === "accounts") refreshCloakBrowser();
 }
 
 // ─── 扫码登录(真实浏览器窗口) ───
@@ -1241,17 +1242,35 @@ function browserChoiceParts(choice) {
   const [backend, runtimeId = ""] = String(choice || "default").split("::", 2);
   return { backend: backend || "default", runtimeId };
 }
+// "跟随全局" 要落到目录里的真实后端才能判断是否内核级指纹环境。
+function effectiveBrowserBackend(browserBackend) {
+  const choice = browserChoiceParts(browserBackend);
+  return choice.backend === "default"
+    ? String((preLoginBrowserCatalog || {}).default || "")
+    : choice.backend;
+}
+// CloakBrowser 与指纹 Chromium 的画像都由内核自己承载,登录前可预设指纹。
+function isEngineIdentityBackend(backend) {
+  return backend === "fingerprint_chromium" || backend === "cloak_browser";
+}
 function browserChoiceOptions(catalog, { localOnly = false } = {}) {
   const backends = catalog.backends || [];
   const defaultBackend = backends.find(item => item.name === catalog.default);
   const local = backends.find(item => item.name === "local");
   const fingerprint = backends.find(item => item.name === "fingerprint_chromium");
+  const cloak = backends.find(item => item.name === "cloak_browser");
   const runtimes = catalog.runtimes || [];
   const options = [];
   if (!localOnly || catalog.default === "local") options.push({
       value: "default",
       label: `跟随全局（${defaultBackend ? defaultBackend.label : catalog.default}）`,
       disabled: !!defaultBackend && !defaultBackend.available,
+  });
+  // CloakBrowser 是默认方案,排在本地环境之前;内核版本由 License 决定,账号不绑定 runtime_id。
+  if (!localOnly && cloak) options.push({
+    value: "cloak_browser",
+    label: cloak.label + (cloak.available ? "" : ` · 不可用：${cloak.detail || "未配置"}`),
+    disabled: !cloak.available,
   });
   if (local) options.push({
     value: "local", label: local.label,
@@ -1321,9 +1340,14 @@ async function choosePreLoginProxy() {
 }
 function freshPreLoginFingerprint(browserBackend) {
   const choice = browserChoiceParts(browserBackend);
-  const runtimes = (preLoginBrowserCatalog || {}).runtimes || [];
+  const catalog = preLoginBrowserCatalog || {};
+  const runtimes = catalog.runtimes || [];
   const runtime = runtimes.find(item => item.runtime_id === choice.runtimeId)
     || runtimes.find(item => item.is_default) || {};
+  // CloakBrowser 不在 runtimes 列表里,版本从 catalog.cloak 读。
+  const runtimeVersion = effectiveBrowserBackend(browserBackend) === "cloak_browser"
+    ? String((catalog.cloak || {}).version || "")
+    : String(runtime.version || "");
   const seed = (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
     ? globalThis.crypto.randomUUID().replaceAll("-", "")
     : `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
@@ -1337,15 +1361,12 @@ function freshPreLoginFingerprint(browserBackend) {
     disable_spoofing: [], language_mode: "auto", timezone_mode: "auto",
     viewport_mode: "auto", location_mode: "auto",
     geolocation_permission: "allow", webrtc_mode: "conceal", extra_args: "",
-    runtime_version: runtime.version || "",
+    runtime_version: runtimeVersion,
   };
 }
 async function configurePreLoginFingerprint(browserBackend) {
-  const choice = browserChoiceParts(browserBackend);
-  const effectiveBackend = choice.backend === "default"
-    ? (preLoginBrowserCatalog || {}).default
-    : choice.backend;
-  if (effectiveBackend !== "fingerprint_chromium") return "";
+  const effectiveBackend = effectiveBrowserBackend(browserBackend);
+  if (!isEngineIdentityBackend(effectiveBackend)) return "";
   const draft = freshPreLoginFingerprint(browserBackend);
   const account = {
     nickname: "新账号",
@@ -3162,6 +3183,137 @@ async function deleteBrowserRuntime(runtimeId) {
     toast("内核记录已移除", "ok");
     await refreshBrowserRuntimes();
   } catch (e) { toast("移除失败：" + e.message, "err"); }
+}
+
+// ─── CloakBrowser 内核(默认方案:Key 有效走 Pro,否则回退 GitHub 免费版)───
+const CLOAK_EDITION_LABELS = { pro: "Pro 内核", free: "GitHub 免费版", custom: "自定义内核" };
+const CLOAK_LICENSE_SOURCES = { settings: "页面保存", config: "config.yaml", env: "环境变量" };
+// 后端的 prepare/license 接口不抛异常,失败原因写在 detail 里,所以文案按状态分支给。
+function cloakLicenseSummary(status) {
+  const license = status.license || {};
+  if (license.valid) return "License 有效" + (license.plan ? "：" + license.plan : "");
+  if (license.configured) return "License 未通过校验 · 使用 GitHub 免费版";
+  return "未配置 License · 使用 GitHub 免费版";
+}
+function renderCloakStatus(status) {
+  const box = $("cloak-status");
+  const state = status || {};
+  const license = state.license || {};
+  const ready = !!state.available;
+  const edition = CLOAK_EDITION_LABELS[state.edition] || state.edition || "未知版本";
+  const source = CLOAK_LICENSE_SOURCES[state.license_source] || "";
+  if (box) box.innerHTML = `<div>
+      <b>${esc(state.label || "CloakBrowser")}</b>
+      <span class="pill ${ready ? "active" : "invalid"}">${ready ? "内核就绪" : "内核未就绪"}</span>
+      <span class="pill bare">${esc(edition)}</span>
+      ${state.is_default ? '<span class="pill active">全局默认</span>' : ""}
+      <span class="pill ${license.valid ? "active" : license.configured ? "invalid" : "bare"}">${esc(cloakLicenseSummary(state))}</span>
+    </div>
+    <div class="mut" style="font-size:11px;margin-top:3px">版本 ${esc(state.version || "未安装")} · 内核标识 ${esc(state.runtime_id || "-")} · 平台 ${esc(state.platform || "-")} · 通道 ${esc(state.release_channel || "-")}${state.auto_download ? " · 允许自动下载" : " · 已关闭自动下载"}${state.allow_headless ? "" : " · 禁用无头"}${state.wrapper_version ? " · wrapper " + esc(state.wrapper_version) : ""}</div>
+    <div class="mut" style="font-size:11px;margin-top:3px;word-break:break-all">License：${esc(license.masked_key || "未配置")}${source ? " · 来源 " + esc(source) : ""}${license.expires ? " · 到期 " + esc(license.expires) : ""}${license.detail ? " · " + esc(license.detail) : ""}</div>
+    <div class="mut" style="font-size:11px;margin-top:3px;word-break:break-all">缓存目录 <code>${esc(state.cache_dir || "-")}</code></div>
+    <div class="mut" style="font-size:11px;margin-top:3px;word-break:break-all">内核路径 <code>${esc(state.executable_path || "尚未落地，点击「检查 / 下载内核」")}</code></div>
+    ${state.detail ? `<div style="font-size:11px;margin-top:3px;${ready ? "" : "color:var(--danger)"}">${esc(state.detail)}</div>` : ""}`;
+  const hint = $("cloak-license-hint");
+  if (hint) hint.textContent = license.masked_key
+    ? `已保存 Key：${license.masked_key}${source ? "（来源：" + source + "）" : ""} · 仅存本地数据库，输入框不回填明文`
+    : "未配置 Key 时使用 CloakBrowser GitHub 免费版；Key 仅保存在本地数据库，不会回显明文";
+}
+
+async function refreshCloakBrowser() {
+  const box = $("cloak-status");
+  if (!box) return;
+  try {
+    renderCloakStatus(await api("/api/cloak-browser"));
+  } catch (e) {
+    box.innerHTML = `<div class="mut" style="font-size:12px">读取 CloakBrowser 状态失败：${esc(e.message)}</div>`;
+  }
+}
+
+async function saveCloakLicense() {
+  const button = evtBtn();
+  const input = $("cloak-license");
+  const key = input ? input.value.trim() : "";
+  if (!key) { toast("请先填写 License Key", "err"); return; }
+  await withBusy(button, "校验中", async () => {
+    try {
+      const status = await api("/api/cloak-browser/license", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ license_key: key }),
+      });
+      if (input) input.value = "";   // 只展示掩码,绝不回填明文
+      renderCloakStatus(status);
+      // Key 有效但 Pro 内核暂时拿不到时,后端会保留 license.valid 而把 edition
+      // 降级成 free。判"是不是真在跑 Pro"只能看 edition,不能看 license.valid。
+      const license = status.license || {};
+      if (status.edition === "pro") toast("License 有效，已切换 CloakBrowser Pro 内核", "ok", 7000);
+      else if (license.valid) toast("License 有效，但暂时用不上 Pro 内核：" + (status.detail || "已回退 GitHub 免费版"), "err", 9000);
+      else toast("Key 未通过校验：" + (license.detail || status.detail || "已回退 GitHub 免费版"), "err", 9000);
+    } catch (e) { toast("保存失败：" + e.message, "err", 7000); }
+  });
+}
+
+async function clearCloakLicense() {
+  const button = evtBtn();
+  if (!await uiConfirm({
+    title: "清除 License Key",
+    message: "清除页面保存的 Key 后回退 CloakBrowser GitHub 免费版；config.yaml 或环境变量里配置的 Key 仍然生效。",
+    okText: "清除", danger: true,
+  })) return;
+  await withBusy(button, "清除中", async () => {
+    try {
+      const status = await api("/api/cloak-browser/license", { method: "DELETE" });
+      const input = $("cloak-license");
+      if (input) input.value = "";
+      renderCloakStatus(status);
+      const source = CLOAK_LICENSE_SOURCES[status.license_source] || "";
+      if (source) toast(`页面 Key 已清除，当前改用 ${source} 中的 Key`, "info", 8000);
+      else toast("License 已清除，改用 CloakBrowser GitHub 免费版", "ok");
+    } catch (e) { toast("清除失败：" + e.message, "err"); }
+  });
+}
+
+async function prepareCloakBrowser() {
+  const button = evtBtn();
+  if (!await uiConfirm({
+    title: "检查 / 下载 CloakBrowser 内核",
+    message: "先校验 License，再按需下载内核。首次下载约 200MB，可能耗时数分钟，请保持网络畅通并不要关闭页面。",
+    okText: "开始",
+  })) return;
+  await withBusy(button, "处理中", async () => {
+    try {
+      const status = await api("/api/cloak-browser/prepare", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_license: true }),
+      });
+      renderCloakStatus(status);
+      if (status.available) toast("内核已就绪：" + (status.label || "CloakBrowser"), "ok", 7000);
+      else toast("内核尚未就绪：" + (status.detail || "未知原因"), "err", 9000);
+    } catch (e) { toast("准备失败：" + e.message, "err", 9000); }
+  });
+}
+
+async function testCloakBrowser() {
+  const button = evtBtn();
+  const box = $("cloak-test");
+  if (box) box.innerHTML = `<div class="mut">正在用一次性 Profile 启动内核…</div>`;
+  await withBusy(button, "自检中", async () => {
+    try {
+      const result = await api("/api/cloak-browser/test", { method: "POST" });
+      if (result.cloak) renderCloakStatus(result.cloak);
+      // webdriver 是布尔/空值,esc() 会把 false 吃成空串,先转字符串。
+      if (box) box.innerHTML = `<div style="font-size:12px;line-height:1.9;word-break:break-all">
+        <div>内核标识：<code>${esc(result.runtime_id || "-")}</code></div>
+        <div>User-Agent：<code>${esc(result.user_agent || "-")}</code></div>
+        <div>platform：<code>${esc(result.platform || "-")}</code> · language：<code>${esc(result.language || "-")}</code> · webdriver：<code>${esc(String(result.webdriver))}</code></div>
+      </div>`;
+      toast("CloakBrowser 启动自检通过", "ok", 7000);
+    } catch (e) {
+      if (box) box.innerHTML = `<div style="font-size:12px;color:var(--danger)">自检失败：${esc(e.message)}</div>`;
+      toast("自检失败：" + e.message, "err", 9000);
+      await refreshCloakBrowser();
+    }
+  });
 }
 
 function uiFingerprintEditor(account, fp, options = {}) {
@@ -6888,7 +7040,7 @@ PLATFORM = (() => { try { const p = localStorage.getItem("dym-pf"); return ["xhs
 applyPlatformUI();
 updateTaskQueuePlatformLabel();
 
-onTypeChange(); bindPubFilePicker(); onPubType(); populateWatchAccount(); applyDanmakuForm(); onAcMode(); loadSettings(); refreshAccounts(); refreshBrowserRuntimes(); refreshProxies(); refreshChannels(); loop();
+onTypeChange(); bindPubFilePicker(); onPubType(); populateWatchAccount(); applyDanmakuForm(); onAcMode(); loadSettings(); refreshAccounts(); refreshCloakBrowser(); refreshBrowserRuntimes(); refreshProxies(); refreshChannels(); loop();
 enhanceAllSelects();   // 把所有原生 <select> 升级为美化下拉
 enhanceAllMetaControls(); // 分组/标签：当前平台词库下拉，可搜索并新增
 enhanceAllDateTime();  // 把 datetime-local 升级为自定义日期选择器

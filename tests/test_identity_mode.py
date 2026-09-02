@@ -298,7 +298,8 @@ class IdentityModeTests(unittest.TestCase):
         self.assertTrue(Path(replacement.profile_dir).name.startswith("account_"))
 
     def test_context_signature_includes_profile_and_fingerprint(self):
-        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir)
+        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir,
+                                 browser_backend="local")
         first = Identity(
             account_id=1,
             profile_dir=str(Path(self.tmp.name) / "profile-first"),
@@ -1120,7 +1121,8 @@ class IdentityModeTests(unittest.TestCase):
             main.browser, main.engine = previous_browser, previous_engine
 
     def test_native_launch_omits_spoofing_options_and_hooks(self):
-        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir)
+        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir,
+                                 browser_backend="local")
         manager._pw = _PatchrightStub()
         identity = Identity(
             account_id=1,
@@ -1147,7 +1149,8 @@ class IdentityModeTests(unittest.TestCase):
         self.assertEqual(context.script_calls, [])
 
     def test_native_proxy_launch_only_adds_webrtc_proxy_routing_flags(self):
-        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir)
+        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir,
+                                 browser_backend="local")
         manager._pw = _PatchrightStub()
         identity = Identity(
             account_id=1,
@@ -1167,7 +1170,8 @@ class IdentityModeTests(unittest.TestCase):
         self.assertTrue(kwargs["no_viewport"])
 
     def test_windows_legacy_launch_keeps_chromium_sandbox_enabled(self):
-        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir)
+        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir,
+                                 browser_backend="local")
         manager._pw = _PatchrightStub()
         identity = Identity(
             account_id=2,
@@ -1184,7 +1188,8 @@ class IdentityModeTests(unittest.TestCase):
             self.assertTrue(kwargs["chromium_sandbox"])
 
     def test_browser_probe_prefers_installed_stable_chrome(self):
-        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir)
+        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir,
+                                 browser_backend="local")
         page = AsyncMock()
         page.evaluate.return_value = (
             "Mozilla/5.0 Chrome/150.0.0.0 Safari/537.36")
@@ -1202,7 +1207,8 @@ class IdentityModeTests(unittest.TestCase):
         self.assertNotIn("args", chromium.launch.await_args.kwargs)
 
     def test_browser_probe_falls_back_when_stable_chrome_is_unavailable(self):
-        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir)
+        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir,
+                                 browser_backend="local")
         page = AsyncMock()
         page.evaluate.return_value = (
             "Mozilla/5.0 Chrome/149.0.0.0 Safari/537.36")
@@ -1220,7 +1226,8 @@ class IdentityModeTests(unittest.TestCase):
         self.assertNotIn("channel", chromium.launch.await_args.kwargs)
 
     def test_persistent_context_uses_selected_browser_channel(self):
-        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir)
+        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir,
+                                 browser_backend="local")
         manager._pw = _PatchrightStub()
         manager._browser_channel = "chrome"
         identity = Identity(
@@ -1234,7 +1241,8 @@ class IdentityModeTests(unittest.TestCase):
         self.assertEqual(manager._pw.chromium.kwargs["channel"], "chrome")
 
     def test_environment_snapshot_is_diagnostic_and_does_not_expose_proxy(self):
-        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir)
+        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir,
+                                 browser_backend="local")
         manager._browser_channel = "chrome"
         manager._chrome_major = 150
         identity = Identity(
@@ -1295,7 +1303,8 @@ class IdentityModeTests(unittest.TestCase):
         self.assertNotIn("127.0.0.1:", dumped)
 
     def test_native_launch_captures_actual_context_user_agent(self):
-        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir)
+        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir,
+                                 browser_backend="local")
         manager._pw = _PatchrightStub()
         manager._pw.chromium.context.pages = [_PageStub()]
         identity = Identity(
@@ -1324,6 +1333,7 @@ class IdentityModeTests(unittest.TestCase):
         manager = BrowserManager(
             "DEFAULT_UA", self.cfg.engine.profiles_dir,
             native_ua_callback=main._persist_native_ua,
+            browser_backend="local",
         )
         manager._pw = _PatchrightStub()
         manager._pw.chromium.context.pages = [_PageStub()]
@@ -1337,7 +1347,8 @@ class IdentityModeTests(unittest.TestCase):
             )
 
     def test_legacy_launch_keeps_existing_identity_behavior(self):
-        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir)
+        manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir,
+                                 browser_backend="local")
         manager._pw = _PatchrightStub()
         manager._chrome_major = 131
         identity = Identity(

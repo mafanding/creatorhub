@@ -8,7 +8,7 @@
 
 CreatorHub 使用 Python + FastAPI 提供统一 Web 界面，用于管理账号、监控作品与评论、下载内容、发布作品和接收通知。账号登录态、数据库及媒体文件均保存在本地。
 
-浏览器交互按平台使用系统 Chrome CDP 或免费开源的 [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)，业务层统一使用兼容的 Playwright API。每个账号使用独立的浏览器 Profile，Cookie、缓存和本地存储互不共享。
+浏览器交互默认使用 CloakBrowser 隐身内核（小红书固定走系统 Chrome CDP），内核由免费开源的 [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright) 拉起，业务层统一使用兼容的 Playwright API。每个账号使用独立的浏览器 Profile，Cookie、缓存和本地存储互不共享。
 
 ## 平台能力
 
@@ -191,9 +191,126 @@ npm install
 - 小红书发布和评论默认使用 `browser` 页面模式。提交按钮只点击一次；提交后若浏览器连接中断或缺少成功证据，任务会标记为“结果待确认”，不会自动重试，需先到平台核对。
 - 如需直接使用 Patchright，可显式设置 `xhs_browser_mode: patchright`。旧配置值 `playwright` 会自动迁移为 `patchright`。
 
+### 默认：CloakBrowser 隐身内核（小红书除外）
+
+除小红书外，CreatorHub 默认使用
+[CloakBrowser](https://cloakbrowser.dev) 作为浏览器内核。它是把指纹改在
+Chromium C++ 源码层的隐身内核：UA/Client Hints、Canvas、Audio、WebGL、时区和
+语言在渲染管线内部就已经改掉，而不是往页面里注入 JavaScript 补丁，因此不存在
+“注入脚本本身被检测出来”的问题，无头模式的画像也是完整的。
+
+CreatorHub 只复用官方 `cloakbrowser` 包的下载、签名校验和 License 校验；浏览器
+仍旧由 Patchright 的持久化 context 拉起，账号、Profile、Cookie、代理、LRU 和
+风控依然由 CreatorHub 管理，不需要外部商业浏览器或云端账号。该后端沿用账号已有
+的 `fp_seed` 生成稳定的内核指纹种子，并显式抬高存储配额，避免常驻 Profile 被
+BrowserScan 一类检测判成隐身窗口。
+
+`browser_backend` 现在有三个取值：
+
+- `cloak_browser`：默认值。内核自带完整画像，按 License 自动在 Pro 与 GitHub
+  免费版之间切换。
+- `fingerprint_chromium`：自备开源指纹内核，见下一节；账号在「环境」里单独选了
+  具体内核时，优先于全局默认。
+- `local`：Patchright 或系统 Chrome，不做内核级指纹改写。
+
+CloakBrowser 账号与 Fingerprint Chromium 账号走同一套内核级指纹流程：首次登录前
+同样会打开「登录前指纹配置」，新环境的首次可见会话仍会附带 BrowserScan 体检
+标签；`native` 写操作闸门也把内核级指纹环境视作合规浏览器，不再额外要求系统
+Chrome。小红书始终不进入该分支。
+
+#### Pro 与 GitHub 免费版的自动切换
+
+- 配置了 License Key 且服务端校验通过 → 使用 **CloakBrowser Pro · 隐身内核**，
+  跟随官方最新构建。
+- 没配 Key、Key 无效或过期、License 服务器不可达且本地无缓存，或 Pro 内核暂时
+  拿不到 → 自动回退 **CloakBrowser · GitHub 版**（官方发布的免费构建，主站是
+  `cloakbrowser.dev`，GitHub Releases 是备用源），不会因此启动失败。
+- 直接指定 `cloak_browser_path` 时使用 **CloakBrowser · 自定义内核**，此时不再
+  区分 Pro 与免费版。
+
+License Key 的解析顺序是 **页面保存 > `config.yaml` > 环境变量**：
+
+1. Web 面板「CloakBrowser 内核」卡片里保存的值，存在本地数据库，便携部署换机器
+   时不必改配置文件；
+2. `config.yaml` 的 `engine.cloak_browser_license_key`；
+3. 环境变量 `CREATORHUB_CLOAKBROWSER_LICENSE_KEY` 或 `CLOAKBROWSER_LICENSE_KEY`。
+
+另外两个环境变量会影响内核解析，排查“配了有效 Key 却拿不到 Pro”时先看它们：
+
+- `CLOAKBROWSER_BINARY_PATH`：等价于 `cloak_browser_path`，直接指定可执行文件并
+  跳过下载，此时版本类型固定为「自定义内核」。
+- `CLOAKBROWSER_DOWNLOAD_URL`：指向私有镜像。**一旦设置，官方 Pro 通道会被上游
+  停用，且内核不再经过官方签名校验**（只剩镜像自带的哈希）。CreatorHub 会在
+  「CloakBrowser 内核」卡片里把这一点说明出来，并且始终禁止用
+  `CLOAKBROWSER_SKIP_CHECKSUM` 把哈希校验也关掉。
+
+在页面上删除 Key 只清掉第 1 项，`config.yaml` 和环境变量里的配置仍然生效。接口和
+页面只回显打码后的片段，不会返回明文 Key。Key 从官方获取：命令行执行
+`cloakbrowser login` 用 GitHub 账号登录可以拿到免费 Key，付费 Pro 在
+[cloakbrowser.dev](https://cloakbrowser.dev) 购买。
+
+> **免费 Key 和多账号并发是冲突的。** 只要 Key 校验通过就一律走 Pro 内核，包括
+> `cloakbrowser login` 拿到的免费 Key —— 而免费档（`plan == "free"`）只允许
+> **1 个并发会话**；而免费构建（Linux/Windows 是 v146，macOS 是 v145）反而没有
+> 并发限制。所以
+> “配了免费 Key 又要跑多账号”（默认 `max_live_contexts: 6`、`active_accounts: 3`）
+> 开箱就会撞上 Pro 授权的并发上限：服务和第 1 个会话正常，第 2 个及之后并发拉起
+> 的浏览器会被内核拒绝。CreatorHub 会把上游的英文授权错误翻译成中文提示；并发
+> 超限是在 CDP 握手**之后**才判定的，浏览器会自行退出，这类情况由内核写下的授权
+> 拒绝记录读回原因，不会只留下一句“浏览器被关闭”。要多并发只有两条路：购买 Pro，
+> 或者干脆不配 Key、直接用 GitHub 免费版。
+
+#### config.yaml 配置
+
+```yaml
+engine:
+  browser_backend: cloak_browser  # 默认值；也可改为 local 或 fingerprint_chromium
+  cloak_browser_license_key: ""   # cb_ 开头；留空即使用 GitHub 免费版
+  cloak_browser_cache_dir: ./data/cloakbrowser # 内核与授权缓存目录，独立于 ~/.cloakbrowser
+  cloak_browser_path: ""          # 已有可执行文件时直接指定，跳过下载
+  cloak_browser_allow_headless: true # 无头画像完整，后台监控默认允许无头
+  cloak_browser_platform: auto    # auto=跟随宿主系统；也可指定 windows/linux/macos
+  cloak_browser_release_channel: stable # stable | preview（preview 仅 Pro 可用）
+  cloak_browser_version: ""       # 固定内核版本回滚用，如 148.0.7778.215.2；留空=跟随最新
+  cloak_browser_auto_download: true # 首次使用时自动下载内核（约 200MB）
+```
+
+与 Fingerprint Chromium 的 `fingerprint_chromium_allow_headless: false` 不同，
+CloakBrowser 默认允许无头，因此后台监控任务不必一直弹窗口；扫码登录、发布等可见
+操作仍使用有头窗口。
+
+#### 首次使用与离线部署
+
+内核约 200MB。当 `browser_backend` 为 `cloak_browser`（默认值）时，服务启动后会
+在后台预热，不阻塞启动；全局用 `local`、只有个别账号选 CloakBrowser 时不会预热，
+内核会在该账号首次启动浏览器时下载。也可以随时在账号页的
+「CloakBrowser 内核」卡片里手动「检查 / 下载内核」，再用「启动自检」真跑一次
+确认内核可用。同一份内核由所有账号共用，不会每个账号各下一份。
+
+- `cloak_browser_auto_download: false` 可以关掉自动下载，之后需要先在页面手动
+  下载内核。
+- `cloak_browser_path` 指向已有的 CloakBrowser 可执行文件即可完全跳过下载。
+- 内核主站是 `cloakbrowser.dev`，GitHub Releases 是备用源；两者都访问受限时，
+  建议先在能联网的环境下载好，再用 `cloak_browser_path` 指定。
+- 内核和授权缓存都落在 `cloak_browser_cache_dir`（默认 `./data/cloakbrowser`），
+  与宿主机上的 `~/.cloakbrowser` 分开，便携部署随项目目录一起走。
+
+#### 从旧版本升级
+
+- 旧配置里显式写了 `browser_backend: local` 的部署不会被改变，仍然使用
+  Patchright / 系统 Chrome。
+- 没写这一项的部署会切换到 CloakBrowser。账号会启用新的 Profile 目录
+  `<账号 profile_dir>/runtimes/cloak-pro|cloak-free|cloak-custom`，登录态由数据库
+  里的 `storage_state` 自动桥接回来，一般不需要重新扫码。
+- Profile 按内核版本隔离是有意为之：146 的 Profile 不该被 151 写过的目录顶掉，
+  反向降级尤其危险。因此 Pro 与免费版之间切换（新增、过期或清除 Key）同样会换一
+  个 Profile 目录，登录态照样从 `storage_state` 桥接。
+- 小红书不受影响，仍固定使用系统 Chrome/CDP。
+- 切换内核会改变账号的设备画像，建议切换后重新检查登录态和代理出口。
+
 ### 可选：Fingerprint Chromium 开源内核（小红书除外）
 
-CreatorHub 可以把开源的
+不想使用默认的 CloakBrowser 时，CreatorHub 也可以把开源的
 [`fingerprint-chromium`](https://github.com/adryfish/fingerprint-chromium)
 作为其他平台的可插拔 Chromium 运行时。账号、Profile、Cookie、代理、LRU 和风控仍由
 CreatorHub 管理，不需要外部商业浏览器或云端账号。小红书始终使用系统 Chrome/CDP：
@@ -207,7 +324,7 @@ CreatorHub 管理，不需要外部商业浏览器或云端账号。小红书始
 
 ```yaml
 engine:
-  browser_backend: local
+  browser_backend: fingerprint_chromium # 全局改用开源指纹内核；不写则保持默认 cloak_browser
   fingerprint_chromium_path: D:/path/to/fingerprint-chromium/chrome.exe
   fingerprint_chromium_root: D:/path/to/browser-kernels
   fingerprint_chromium_allow_headless: false
@@ -215,8 +332,10 @@ engine:
 ```
 
 4. 重启 CreatorHub，在账号的「环境」设置中选择具体内核版本。
-   `browser_backend: fingerprint_chromium` 可以将默认指纹内核应用到所有未单独
-   指定环境的非小红书账号；小红书仍固定走系统 Chrome/CDP。
+   `browser_backend: fingerprint_chromium` 会把默认指纹内核应用到所有未单独指定
+   环境的非小红书账号；只想给个别账号使用时，保留默认的 `cloak_browser`，在账号
+   「环境」里单独选内核即可。`browser_backend: local` 则是显式退回 Patchright /
+   系统 Chrome。小红书仍固定走系统 Chrome/CDP。
 
 添加新的非小红书账号时，选择具体 Fingerprint Chromium 内核和代理后，会在浏览器首次启动前
 打开「登录前指纹配置」。语言、时区、位置和窗口可继续跟随出口 IP 自动生成，也可切换
@@ -238,8 +357,9 @@ IP、时区、WebRTC 与浏览器指纹。账号页的「环境检测」可以�
 “已提示”只表示检测页已打开，不代表目标平台风控一定通过。BrowserScan 是第三方站点，
 会看到该环境的出口 IP 和浏览器特征。
 
-项目不捆绑上游浏览器二进制；升级浏览器时请先备份 `data/profiles/` 并在测试账号上
-验证兼容性。
+项目不捆绑 Fingerprint Chromium 的上游二进制；CloakBrowser 内核则由官方
+`cloakbrowser` 包下载并做签名校验。升级任一内核前，建议先备份 `data/profiles/`
+并在测试账号上验证兼容性。
 
 ## 任务队列与平台风控
 
@@ -257,7 +377,7 @@ Web 面板的「任务队列」统一展示采集、发布、自动评论、账�
 ### 浏览器与网络出口
 
 - 存量账号继续使用 `legacy` 浏览器画像，避免已有 Profile 漂移；新扫码与 Cookie 账号使用 `native` 模式。
-- `native` 账号的发布、评论、关注和私信会检查系统 Chrome、有头页面、独立 Profile 及代理出口基线。
+- `native` 账号的发布、评论、关注和私信会检查系统 Chrome、有头页面、独立 Profile 及代理出口基线；使用 CloakBrowser 或 Fingerprint Chromium 等内核级指纹环境时，改为检查该内核是否可用。
 - 账号页的「测试代理」会记录出口 IP、国家、ASN 和时区；出口漂移或基线过期后，写任务保留在队列，重新验证后再执行。
 - 每个账号 Profile 都有跨进程占用保护；同一出口下多个账号集中触发风险时，会启用出口组熔断。
 
@@ -320,10 +440,12 @@ python -m app.engine.share_downloader "完整分享文案或链接" -o ./data/me
 data/
 ├─ creatorhub.db   # SQLite 数据库
 ├─ media/          # 下载内容
-└─ profiles/       # 账号浏览器配置与登录态
+├─ cloakbrowser/   # CloakBrowser 内核与授权缓存（约 200MB）
+└─ profiles/       # 账号浏览器配置与登录态；内核级指纹环境在各账号的 runtimes/ 下
 ```
 
-备份项目前，建议一并备份 `config.yaml` 和 `data/`。
+备份项目前，建议一并备份 `config.yaml` 和 `data/`；`data/cloakbrowser/` 是可以
+重新下载的内核缓存，不备份也不影响登录态。
 
 ## 常见问题
 
@@ -337,6 +459,8 @@ data/
 | 抓取不到作品或评论 | 检查登录态、目标链接和网络状态，必要时重新登录并降低频率 |
 | 小红书链接解析失败 | 重新复制包含有效 `xsec_token` 的完整链接 |
 | 仅音频仍得到 MP4，或视频没有声音/画质受限 | 重新运行安装命令更新依赖；也可安装系统 ffmpeg 并加入 `PATH` |
+| CloakBrowser 内核下载慢或失败 | 确认能访问 GitHub；也可在能联网的机器上下载后用 `cloak_browser_path` 指定，或设 `cloak_browser_auto_download: false` 后在页面手动下载 |
+| 多账号运行时提示 License 并发上限 | `cloakbrowser login` 拿到的免费 Key 只允许 1 个并发会话；需要多账号并发请购买 Pro，或删掉 Key 改用 GitHub 免费版 |
 
 仍有问题可提交 [Issue](https://github.com/3441293738/creatorhub/issues)，并附上平台、操作步骤和服务端错误日志。
 

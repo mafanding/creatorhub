@@ -5,6 +5,8 @@ pyyaml==6.0.3
 tzdata>=2025.2          # Windows 上为 zoneinfo 提供 IANA 时区数据库
 sqlmodel==0.0.22
 patchright==1.61.2
+cloakbrowser==0.5.10     # CloakBrowser 隐身内核:下载/签名校验/License(Pro 与 GitHub 版切换)
+                         # 固定版本:它是"下载并执行原生二进制"这条链的信任根,签名公钥就硬编码在包里
 xhshow>=0.2.0          # 小红书请求签名(X-S/X-T/x-S-Common)纯算法库
 curl_cffi>=0.7         # 小红书签名直连的 TLS 指纹复刻(impersonate=chrome,绕 JA3 风控)
 python-multipart>=0.0.9   # 发布:上传图集/视频文件

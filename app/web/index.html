@@ -1970,6 +1970,44 @@
       <div class="table-wrap mini-table"><table id="acc-table" aria-label="平台账号列表"><tbody></tbody></table></div>
     </div>
 
+    <!-- CloakBrowser 内核(默认方案:Pro / GitHub 免费版自动择一) -->
+    <div class="card">
+      <div class="card-head">
+        <span class="card-ic"><svg><use href="#i-shield"/></svg></span>
+        <h2>CloakBrowser 内核 <span class="sub">默认方案 · 有效 Key 用 Pro，否则 GitHub 版</span></h2>
+      </div>
+      <p class="mut" style="font-size:12px;margin:-4px 0 12px">
+        CloakBrowser 是新账号与后续任务的默认浏览器方案，指纹由内核自身承载，不再依赖注入式补丁。
+        填入有效 License Key 使用 <b>CloakBrowser Pro</b>（最新内核、补丁更全、可多并发）；未配置或校验不通过时自动回退 GitHub 免费版（内核版本较旧，但没有并发限制）。
+        注意：GitHub 登录换来的免费 Key 属于 Pro 通道但<b>只允许 1 个并发会话</b>，多账号同时在线会被内核拒绝；要多并发请购买 Pro，或干脆不配 Key 用 GitHub 版。
+        Pro 与免费版各自使用独立 Profile 目录，切换版本后登录态会自动重新桥接。
+      </p>
+      <div id="cloak-status" style="margin-bottom:12px">
+        <div class="mut" style="font-size:12px">读取中…</div>
+      </div>
+      <div class="form-grid">
+        <div class="form-field">
+          <label for="cloak-license">License Key</label>
+          <div class="input-affix">
+            <input id="cloak-license" type="password" autocomplete="new-password" placeholder="cb_xxxxxxxx">
+            <button class="input-action" type="button" onclick="toggleSecretInput('cloak-license',this,'License Key')" aria-label="显示 License Key" aria-pressed="false" title="显示或隐藏 License Key"><svg><use href="#i-eye"/></svg></button>
+          </div>
+          <div class="field-help" id="cloak-license-hint">未配置 Key 时使用 CloakBrowser GitHub 免费版；Key 仅保存在本地数据库，不会回显明文</div>
+        </div>
+      </div>
+      <div class="form-note">
+        <svg aria-hidden="true"><use href="#i-info"/></svg>
+        <span>「检查 / 下载内核」会先校验 License 再按需落地内核：首次下载约 200MB，可能耗时数分钟，期间请勿关闭页面。</span>
+      </div>
+      <div class="form-actions">
+        <button class="ghost" onclick="clearCloakLicense()"><svg><use href="#i-trash"/></svg>清除 Key</button>
+        <button class="ghost" onclick="prepareCloakBrowser()"><svg><use href="#i-download"/></svg>检查 / 下载内核</button>
+        <button class="ghost" onclick="testCloakBrowser()"><svg><use href="#i-bolt"/></svg>启动自检</button>
+        <button onclick="saveCloakLicense()"><svg><use href="#i-check"/></svg>保存并校验</button>
+      </div>
+      <div id="cloak-test" style="margin-top:10px"></div>
+    </div>
+
     <!-- 指纹 Chromium 多版本内核 -->
     <div class="card">
       <div class="card-head">

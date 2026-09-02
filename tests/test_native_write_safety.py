@@ -45,7 +45,9 @@ class NativeWriteSafetyTests(unittest.TestCase):
         second.release()
 
     def test_native_write_gate_requires_chrome_and_fresh_proxy_baseline(self):
-        manager = BrowserManager("UA")
+        # 这条断言的是"本地/系统 Chrome"路径的门禁语义,与全局默认内核无关,
+        # 所以显式固定 local(默认已改为 CloakBrowser)。
+        manager = BrowserManager("UA", browser_backend="local")
         manager._pw = object()
         account = SimpleNamespace(
             identity_mode="native",

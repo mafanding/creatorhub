@@ -95,6 +95,7 @@ class Identity:
     # 仅用于选择浏览器后端；放在末尾保持现有位置参数构造兼容。
     platform: str = ""
     # fingerprint_chromium 下选择的具体本地内核；空表示跟随默认内核。
+    # cloak_browser 忽略该字段（内核版本随 License 自动切换）。
     browser_runtime_id: str = ""
     # 扫码页已经观察到的当前用户资料，仅在本次登录内存中传递；不参与指纹签名。
     observed_login_profile: dict = field(default_factory=dict, repr=False)

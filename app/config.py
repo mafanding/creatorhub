@@ -44,8 +44,20 @@ class EngineConfig:
     # ── 多账号风控隔离 ──
     profiles_dir: str = "./data/profiles"   # 每账号持久化浏览器 profile 根目录
     max_live_contexts: int = 6              # 同时常驻的浏览器 context 上限(LRU 驱逐,控内存)
-    # 全局浏览器运行时；账号可用 browser_backend 单独覆盖。
-    browser_backend: str = "local"          # local | fingerprint_chromium
+    # 全局浏览器运行时；账号可用 browser_backend 单独覆盖。默认 CloakBrowser。
+    browser_backend: str = "cloak_browser"  # cloak_browser | local | fingerprint_chromium
+    # ── CloakBrowser(默认内核)──
+    # 有 License Key 且校验通过时用 Pro 内核，否则自动回退 GitHub 免费版。
+    # 也可用环境变量 CREATORHUB_CLOAKBROWSER_LICENSE_KEY / CLOAKBROWSER_LICENSE_KEY，
+    # 或在页面「CloakBrowser 内核」卡片里保存（页面保存的优先级最高）。
+    cloak_browser_license_key: str = ""     # cb_ 开头
+    cloak_browser_cache_dir: str = "./data/cloakbrowser"  # 内核与授权缓存目录
+    cloak_browser_path: str = ""            # 自定义 CloakBrowser 可执行文件（跳过下载）
+    cloak_browser_allow_headless: bool = True   # CloakBrowser 无头画像完整，默认允许
+    cloak_browser_platform: str = "auto"        # auto | windows | linux | macos
+    cloak_browser_release_channel: str = "stable"  # stable | preview（Pro 专用）
+    cloak_browser_version: str = ""         # 固定内核版本，如 148.0.7778.215.2
+    cloak_browser_auto_download: bool = True    # 首次使用时自动下载内核
     fingerprint_chromium_path: str = ""     # 开源 fingerprint-chromium 的 chrome/chrome.exe
     fingerprint_chromium_root: str = ""     # 多内核扫描根目录；递归发现 chrome/chrome.exe
     fingerprint_chromium_allow_headless: bool = False  # 上游无头画像不完整，默认强制有头
@@ -206,11 +218,27 @@ def load_config(path: str | None = None) -> Config:
         if cfg.engine.xhs_cdp_idle_seconds is not None:
             cfg.engine.xhs_cdp_idle_seconds = max(
                 0, int(cfg.engine.xhs_cdp_idle_seconds))
-        backend = str(cfg.engine.browser_backend or "local").strip().lower()
+        backend = str(
+            cfg.engine.browser_backend or "cloak_browser").strip().lower()
         cfg.engine.browser_backend = (
-            backend if backend in {"local", "fingerprint_chromium"}
-            else "local"
+            backend
+            if backend in {"cloak_browser", "local", "fingerprint_chromium"}
+            else "cloak_browser"
         )
+        cloak_platform = str(
+            cfg.engine.cloak_browser_platform or "auto").strip().lower()
+        cfg.engine.cloak_browser_platform = (
+            cloak_platform
+            if cloak_platform in {"auto", "windows", "linux", "macos"}
+            else "auto"
+        )
+        cfg.engine.cloak_browser_release_channel = (
+            "preview"
+            if str(cfg.engine.cloak_browser_release_channel or "").strip().lower()
+            == "preview" else "stable"
+        )
+        cfg.engine.cloak_browser_license_key = str(
+            cfg.engine.cloak_browser_license_key or "").strip()
         fingerprint_platform = str(
             cfg.engine.fingerprint_chromium_platform or "auto"
         ).strip().lower()

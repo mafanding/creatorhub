@@ -42,8 +42,8 @@ from .browser import (BrowserManager, cookie_string_to_state,
                       fetch_account_works, fetch_follows, fetch_dm_conversations,
                       fetch_dm_history)
 from .browser.backends import (
-    ACCOUNT_BROWSER_BACKENDS, LOCAL_BACKEND, fingerprint_seed_u32,
-    parse_extra_launch_args,
+    ACCOUNT_BROWSER_BACKENDS, CLOAK_BROWSER_BACKEND, ENGINE_IDENTITY_BACKENDS,
+    LOCAL_BACKEND, fingerprint_seed_u32, parse_extra_launch_args,
 )
 from .browser.ip_fingerprint import derive_ip_fingerprint
 from .browser.runtime_catalog import (
@@ -367,6 +367,55 @@ def _browser_runtime_scan_roots() -> list[str]:
     return result
 
 
+CLOAK_LICENSE_SETTING = "cloak_browser_license_key"
+
+
+async def _warm_cloak_runtime() -> None:
+    """后台预热 CloakBrowser 内核。任何失败都只记日志,不影响其它后端。"""
+    if browser is None or browser.default_browser_backend != CLOAK_BROWSER_BACKEND:
+        return
+    try:
+        status = await browser.prepare_cloak_runtime()
+    except Exception as exc:  # pragma: no cover - 后台任务兜底
+        print(f"[startup] CloakBrowser 内核预热失败(不影响启动): {exc!r}")
+        return
+    if status.get("available"):
+        edition = "Pro" if status.get("edition") == "pro" else "GitHub 版"
+        print(f"[startup] CloakBrowser 内核就绪: {edition} {status.get('version', '')}")
+    else:
+        print(f"[startup] CloakBrowser 内核暂不可用: {status.get('detail', '')}")
+
+
+def _cloak_license_key() -> str:
+    """CloakBrowser License Key 的解析顺序:页面保存 > config.yaml > 环境变量。
+
+    页面保存的值放在 AppSetting 里,这样便携部署换机器时不必改配置文件;环境
+    变量沿用官方 wrapper 的名字,方便和已有的 CloakBrowser 安装共用一个 key。
+    """
+    try:
+        saved = get_setting(CLOAK_LICENSE_SETTING, "").strip()
+    except Exception:
+        saved = ""
+    if saved:
+        return saved
+    configured = str(cfg.engine.cloak_browser_license_key or "").strip()
+    if configured:
+        return configured
+    for name in ("CREATORHUB_CLOAKBROWSER_LICENSE_KEY",
+                 "CLOAKBROWSER_LICENSE_KEY"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _cloak_browser_path() -> str:
+    configured = str(cfg.engine.cloak_browser_path or "").strip()
+    if configured:
+        return configured
+    return os.environ.get("CLOAKBROWSER_BINARY_PATH", "").strip()
+
+
 def _seed_browser_runtimes() -> list[dict]:
     """Import configured/discovered runtimes and return manager specifications."""
     discovered: dict[str, dict] = {}
@@ -505,8 +554,19 @@ async def lifespan(app: FastAPI):
         fingerprint_chromium_platform=(
             cfg.engine.fingerprint_chromium_platform),
         fingerprint_chromium_runtimes=runtime_specs,
-        fingerprint_default_runtime_id=default_runtime_id)
+        fingerprint_default_runtime_id=default_runtime_id,
+        cloak_browser_license_key=_cloak_license_key(),
+        cloak_browser_cache_dir=cfg.engine.cloak_browser_cache_dir,
+        cloak_browser_path=_cloak_browser_path(),
+        cloak_browser_allow_headless=cfg.engine.cloak_browser_allow_headless,
+        cloak_browser_platform=cfg.engine.cloak_browser_platform,
+        cloak_browser_release_channel=cfg.engine.cloak_browser_release_channel,
+        cloak_browser_version=cfg.engine.cloak_browser_version,
+        cloak_browser_auto_download=cfg.engine.cloak_browser_auto_download)
     await browser.start()
+    # CloakBrowser 是默认内核,但 License 校验要联网、内核约 200MB。启动阶段
+    # 只做后台预热,既不阻塞服务起来,也让第一次扫码登录不必等下载。
+    asyncio.create_task(_warm_cloak_runtime())
     engine = MonitorEngine(cfg, browser)
     startup_now = datetime.utcnow()
     pruned_risk_events = engine._prune_risk_events_if_due(startup_now)
@@ -915,7 +975,7 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                 effective_backend = _browser_backend_status(
                     requested_backend, browser_runtime_id).get("name", "")
             is_fingerprint_environment = (
-                effective_backend == "fingerprint_chromium")
+                effective_backend in ENGINE_IDENTITY_BACKENDS)
             if is_fingerprint_environment:
                 geo = await _proxy_geo(proxy, timeout=6)
                 if geo and geo.get("ip"):
@@ -1242,7 +1302,7 @@ def _validate_prelogin_fingerprint(
     if value is None:
         return None
     status = _browser_backend_status(browser_backend, browser_runtime_id)
-    if status.get("name") != "fingerprint_chromium":
+    if status.get("name") not in ENGINE_IDENTITY_BACKENDS:
         raise HTTPException(400, "仅指纹浏览器环境支持登录前指纹配置")
     if len(json.dumps(value, ensure_ascii=False)) > 12000:
         raise HTTPException(400, "登录前指纹配置超过长度限制")
@@ -2230,6 +2290,103 @@ async def list_browser_backends():
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     return browser.backend_catalog()
+
+
+class CloakLicenseIn(BaseModel):
+    license_key: str = ""
+
+
+class CloakPrepareIn(BaseModel):
+    refresh_license: bool = False
+    download: bool | None = None
+
+
+def _cloak_license_source() -> str:
+    """告诉用户当前生效的 key 来自哪里,避免"改了配置没生效"的困惑。"""
+    try:
+        if get_setting(CLOAK_LICENSE_SETTING, "").strip():
+            return "settings"
+    except Exception:
+        pass
+    if str(cfg.engine.cloak_browser_license_key or "").strip():
+        return "config"
+    for name in ("CREATORHUB_CLOAKBROWSER_LICENSE_KEY",
+                 "CLOAKBROWSER_LICENSE_KEY"):
+        if os.environ.get(name, "").strip():
+            return "env"
+    return ""
+
+
+def _cloak_payload(status: dict) -> dict:
+    payload = dict(status)
+    payload["license_source"] = _cloak_license_source()
+    payload["is_default"] = (
+        browser is not None
+        and browser.default_browser_backend == CLOAK_BROWSER_BACKEND)
+    return payload
+
+
+@app.get("/api/cloak-browser")
+async def get_cloak_browser():
+    if browser is None:
+        raise HTTPException(503, "浏览器未就绪")
+    return _cloak_payload(browser.cloak_status())
+
+
+@app.post("/api/cloak-browser/prepare")
+async def prepare_cloak_browser(body: CloakPrepareIn | None = None):
+    """校验 License 并按需下载内核。内核约 200MB,首次可能耗时数分钟。"""
+    if browser is None:
+        raise HTTPException(503, "浏览器未就绪")
+    options = body or CloakPrepareIn()
+    status = await browser.prepare_cloak_runtime(
+        allow_download=options.download,
+        refresh_license=bool(options.refresh_license))
+    return _cloak_payload(status)
+
+
+@app.put("/api/cloak-browser/license")
+async def set_cloak_browser_license(body: CloakLicenseIn):
+    """保存 License Key。key 有效走 Pro,否则自动回退 CloakBrowser GitHub 版。"""
+    if browser is None:
+        raise HTTPException(503, "浏览器未就绪")
+    key = str(body.license_key or "").strip()
+    if len(key) > 200:
+        raise HTTPException(400, "License Key 长度超出限制")
+    # 这个值会被写进子进程环境变量,用白名单而不是"排除空白字符":NUL 之类的
+    # 控制字符能穿过 isspace 检查,到 os.environ 赋值时才炸。
+    if key and not re.fullmatch(r"[A-Za-z0-9_\-]+", key):
+        raise HTTPException(400, "License Key 只能包含字母、数字、下划线和连字符")
+    set_setting(CLOAK_LICENSE_SETTING, key)
+    browser.cloak_runtime.set_license_key(key or _cloak_license_key())
+    status = await browser.prepare_cloak_runtime(refresh_license=True)
+    return _cloak_payload(status)
+
+
+@app.delete("/api/cloak-browser/license")
+async def clear_cloak_browser_license():
+    """清除页面保存的 key;config.yaml / 环境变量里的配置仍然生效。"""
+    if browser is None:
+        raise HTTPException(503, "浏览器未就绪")
+    set_setting(CLOAK_LICENSE_SETTING, "")
+    browser.cloak_runtime.set_license_key(_cloak_license_key())
+    status = await browser.prepare_cloak_runtime(refresh_license=True)
+    return _cloak_payload(status)
+
+
+@app.post("/api/cloak-browser/test")
+async def test_cloak_browser():
+    """用一次性 Profile 真正拉起 CloakBrowser,确认内核可用。"""
+    if browser is None:
+        raise HTTPException(503, "浏览器未就绪")
+    try:
+        result = await browser.probe_fingerprint_runtime(
+            "", Path(cfg.engine.profiles_dir) / "_runtime_probes",
+            backend=CLOAK_BROWSER_BACKEND)
+    except Exception as exc:
+        raise HTTPException(400, f"{type(exc).__name__}: {exc}"[:500]) from exc
+    result["cloak"] = _cloak_payload(browser.cloak_status())
+    return result
 
 
 def _register_runtime_with_manager(runtime: BrowserRuntime | dict) -> None:
