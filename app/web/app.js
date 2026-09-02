@@ -7297,6 +7297,7 @@ function aiDraftCards() {
 
 async function saveAiDraft() {
   const btn = evtBtn();
+  const id = AI_DRAFT_ID;
   let cards;
   try { cards = aiDraftCards(); }
   catch (e) { $("ai-d-msg").textContent = "卡片 JSON 读不了：" + e.message; toast("卡片 JSON 读不了", "err"); return; }
@@ -7308,13 +7309,13 @@ async function saveAiDraft() {
   };
   await withBusy(btn, "保存中", async () => {
     try {
-      const d = await api(`/api/ai/drafts/${AI_DRAFT_ID}`, {
+      const d = await api(`/api/ai/drafts/${id}`, {
         method: "PUT", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       $("ai-d-msg").textContent = (d.problems || []).length
         ? `已保存，还有 ${d.problems.length} 处没过预检` : "已保存，预检全过 ✓";
-      openAiDraft(AI_DRAFT_ID, true);
+      openAiDraft(id, true);
       refreshAiDrafts();
     } catch (e) { $("ai-d-msg").textContent = "失败：" + e.message; toast("保存失败：" + e.message, "err"); }
   });
@@ -7322,33 +7323,40 @@ async function saveAiDraft() {
 
 async function rerenderAiDraft() {
   const btn = evtBtn();
+  const id = AI_DRAFT_ID;
   await withBusy(btn, "渲染中", async () => {
     try {
-      const d = await api(`/api/ai/drafts/${AI_DRAFT_ID}/render`, { method: "POST" });
+      const d = await api(`/api/ai/drafts/${id}/render`, { method: "POST" });
       $("ai-d-msg").textContent = (d.problems || []).length
         ? `重渲完了，还有 ${d.problems.length} 处没过预检` : "重渲完了，预检全过 ✓";
-      openAiDraft(AI_DRAFT_ID, true);
+      openAiDraft(id, true);
       refreshAiDrafts();
     } catch (e) { $("ai-d-msg").textContent = "失败：" + e.message; toast("渲染失败：" + e.message, "err", 8000); }
   });
 }
 
 async function regenerateAiDraft() {
+  const id = AI_DRAFT_ID;
   if (!await uiConfirm({
     title: "重新生成", okText: "重新生成",
     message: "会重新调一次模型并重出所有图，你在这里改过的内容会被覆盖。",
   })) return;
   try {
-    await api(`/api/ai/drafts/${AI_DRAFT_ID}/regenerate`, { method: "POST" });
+    await api(`/api/ai/drafts/${id}/regenerate`, { method: "POST" });
     $("ai-d-msg").textContent = "已排进后台，一两分钟后回来看。";
     toast("已重新排队 ✓", "ok");
-    openAiDraft(AI_DRAFT_ID, true);
+    openAiDraft(id, true);
     refreshAiDrafts();
   } catch (e) { toast("失败：" + e.message, "err", 8000); }
 }
 
 async function aiDraftToPublish() {
   const btn = evtBtn();
+  // **先把 id 拿在手里。** 下面要 await 一个弹窗,等待期间任何一次误点都可能
+  // 触发 hideAiDraftModal() 把 AI_DRAFT_ID 置空,于是请求打到 .../null/... ——
+  // 服务端只会回一个 422,错误信息里完全看不出是这么回事。
+  const id = AI_DRAFT_ID;
+  if (!id) { toast("草稿窗口已经关掉了，重新点开那一篇再试", "err"); return; }
   const accounts = [...$("ai-draft-acc").options].filter(o => o.value)
     .map(o => ({ value: o.value, label: o.textContent }));
   if (!accounts.length) { toast("先在账号页登录一个可发布的账号", "err"); return; }
@@ -7360,13 +7368,13 @@ async function aiDraftToPublish() {
   if (!picked) return;
   await withBusy(btn, "创建中", async () => {
     try {
-      const out = await api(`/api/ai/drafts/${AI_DRAFT_ID}/to-publish`, {
+      const out = await api(`/api/ai/drafts/${id}/to-publish`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ account_id: Number(picked) }),
       });
       $("ai-d-msg").textContent = `已创建发布任务 #${out.publish.id}`;
       toast("已转成发布任务 ✓ 去「发布」页看", "ok", 6000);
-      openAiDraft(AI_DRAFT_ID, true);
+      openAiDraft(id, true);
       refreshAiDrafts();
       if (typeof refreshPublish === "function") refreshPublish();
     } catch (e) { $("ai-d-msg").textContent = "失败：" + e.message; toast("失败：" + e.message, "err", 9000); }

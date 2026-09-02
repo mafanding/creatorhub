@@ -273,6 +273,10 @@
   }
   /* 预览层要能盖在转发弹窗(#repost 同为 pv-overlay)之上,否则点缩略图看不到大图 */
   #preview { z-index:110; }
+  /* 通用确认/选择/输入弹窗要盖在**所有** overlay 之上 —— 它经常是从另一个弹窗里
+     打开的(比如草稿弹窗里点「转为发布任务」)。同 z-index 时 DOM 靠后的那个赢,
+     于是它会开在下面:看得见、点不着,点下去还会命中下层 overlay 的关闭区。 */
+  #uimodal { z-index:130; }
   .pv-box {
     position:relative; background:var(--surface); border:1px solid var(--line);
     border-radius:var(--r-lg); box-shadow:var(--sh);
