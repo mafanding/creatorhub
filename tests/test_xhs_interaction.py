@@ -460,6 +460,114 @@ class XhsInteractionTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_body_with_blank_lines_survives_contenteditable_readback(self):
+        # 这是线上真实的失败:正文段落之间空一行(给手机上读的人写的),
+        # 而 contenteditable 的 innerText 按渲染结果拼 —— 一个 <p> 边界两个换行,
+        # TipTap 的空行能读成五个。逐字比的话每一篇有分段的笔记都发不出去。
+        async def scenario():
+            page = _Page()
+            locator = _Locator(page)
+            body = "第一段。\n\n第二段。\n\n第三段。"
+
+            class Contenteditable(type(locator)):
+                async def input_value(self):
+                    raise RuntimeError("不是表单控件")
+
+                async def evaluate(self, _script):
+                    # 一个逻辑换行读回来变成三到五个,还带尾部空行
+                    return self.value.replace("\n\n", "\n\n\n\n\n") + "\n"
+
+            editor = Contenteditable(page)
+            policy = XhsInteractionPolicy(rng=random.Random(1), sleep=AsyncMock())
+            await policy.insert_long(editor, body, page=page)
+            self.assertEqual(page.keyboard.insertions, [body])
+
+        asyncio.run(scenario())
+
+    def test_nbsp_and_zero_width_substitutions_are_tolerated(self):
+        async def scenario():
+            page = _Page()
+
+            class Editor(_Locator):
+                async def input_value(self):
+                    # 编辑器爱拿不换行空格替连续空格,还塞零宽字符做光标锚点
+                    return (self.value.replace(" ", "\u00a0")
+                            .replace("。", "。\u200b"))
+
+            editor = Editor(page)
+            policy = XhsInteractionPolicy(rng=random.Random(1), sleep=AsyncMock())
+            await policy.insert_long(editor, "省 $3.51 的鸡腿。真的划算", page=page)
+
+        asyncio.run(scenario())
+
+    def test_truncated_text_is_reported_as_truncation(self):
+        async def scenario():
+            page = _Page()
+
+            class Capped(_Locator):
+                async def input_value(self):
+                    return self.value[:5]
+
+            policy = XhsInteractionPolicy(rng=random.Random(1), sleep=AsyncMock())
+            with self.assertRaises(RuntimeError) as caught:
+                await policy.insert_long(Capped(page), "一二三四五六七八九十", page=page)
+            self.assertIn("被截断", str(caught.exception))
+
+        asyncio.run(scenario())
+
+    def test_text_that_never_landed_says_so(self):
+        async def scenario():
+            page = _Page()
+
+            class Empty(_Locator):
+                async def input_value(self):
+                    return ""
+
+            policy = XhsInteractionPolicy(rng=random.Random(1), sleep=AsyncMock())
+            with self.assertRaises(RuntimeError) as caught:
+                await policy.insert_long(Empty(page), "正文", page=page)
+            self.assertIn("没写进", str(caught.exception))
+
+        asyncio.run(scenario())
+
+    def test_garbled_text_points_at_the_first_difference(self):
+        async def scenario():
+            page = _Page()
+
+            class Wrong(_Locator):
+                async def input_value(self):
+                    return "一二三丙丁戊"
+
+            policy = XhsInteractionPolicy(rng=random.Random(1), sleep=AsyncMock())
+            with self.assertRaises(RuntimeError) as caught:
+                await policy.insert_long(Wrong(page), "一二三四五六", page=page)
+            message = str(caught.exception)
+            self.assertIn("第 4 字", message)
+            self.assertIn("丙丁戊", message)
+            # 正文整段不该被贴进错误信息里
+            self.assertNotIn("一二三四五六", message)
+
+        asyncio.run(scenario())
+
+    def test_a_late_settling_editor_gets_a_second_chance(self):
+        # insert_text 是一次 CDP 调用,但 ProseMirror 的事务可能晚一拍。
+        # 没有重试的话,一次慢提交就是一次硬失败。
+        async def scenario():
+            page = _Page()
+
+            class Late(_Locator):
+                reads = 0
+
+                async def input_value(self):
+                    Late.reads += 1
+                    return "" if Late.reads < 3 else self.value
+
+            policy = XhsInteractionPolicy(rng=random.Random(1), sleep=AsyncMock())
+            await policy.insert_long(Late(page), "正文", page=page)
+            self.assertGreaterEqual(Late.reads, 3)
+
+        asyncio.run(scenario())
+
     def test_visible_page_closes_temporary_page_and_one_shot_context(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:

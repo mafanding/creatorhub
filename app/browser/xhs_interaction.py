@@ -50,6 +50,19 @@ class XhsVisibleActionGate:
                 self._semaphore.release()
 
 
+# 零宽字符不是空白,`str.split()` 不会去掉它们 —— 而编辑器会拿它们做光标锚点。
+_ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"))
+
+
+def _skeleton(text: str) -> str:
+    """只留字符,去掉全部空白和零宽标记。
+
+    `str.split()` 按 Unicode 空白切,所以不换行空格 `\u00a0` 和全角空格
+    `\u3000` 也一并处理掉了 —— 编辑器很爱拿它们替换连续空格。
+    """
+    return "".join(str(text).translate(_ZERO_WIDTH).split())
+
+
 class XhsInteractionPolicy:
     """Page-native clicks, input and finite scrolling with bounded cadence."""
 
@@ -133,14 +146,55 @@ class XhsInteractionPolicy:
         await self._verify_text(locator, str(text))
         await self._after_action()
 
-    async def _verify_text(self, locator: Any, expected: str) -> None:
-        try:
-            actual = await locator.input_value()
-        except Exception:
-            actual = await locator.evaluate(
-                "el => el.value ?? el.innerText ?? el.textContent ?? ''")
-        if str(actual) != expected:
-            raise RuntimeError("小红书文本输入结果与预期不一致")
+    async def _verify_text(
+            self, locator: Any, expected: str, *, attempts: int = 8) -> None:
+        """确认写进去的确实是我们要写的那段字。
+
+        **比的是去掉全部空白之后的字符流,不是原字符串。** 正文编辑器是
+        contenteditable(TipTap / ProseMirror),`input_value()` 在它上面会抛,
+        于是读回来的是 `innerText` —— 而 `innerText` 是按**渲染结果**拼的:
+        一个 `<p>` 边界算两个换行,TipTap 用 `<p><br></p>` 表示的空行能读成五个。
+        于是正文里只要有一个空行(段落之间空一行,这是给手机上读的人写的),
+        插进去的 `\n\n` 读回来就是三到五个 `\n`,逐字比必然不等 ——
+        **每一篇有分段的笔记都会在这里失败。**
+
+        空白是渲染产物,字符不是。所以空白全部忽略,字符一个都不能少 ——
+        截断、没写进去、写错控件仍然拦得住,而且分别报不同的话:
+        「发布页面异常」这种笼统的错什么线索都不给。
+
+        允许重试:`insert_text` 是一次 CDP 调用,但 ProseMirror 的事务和 React
+        的提交可能晚一拍,80 毫秒读不到不代表没写进去。
+
+        代价说清楚:这样比**看不出「段落被合并成了空格」** —— 内容对,排版丢了。
+        真要管排版,该改的是 `insert_long`(按段落插、中间按 Enter),不是这里 ——
+        在验证里较真只会把能发的笔记拦下来。
+        """
+        want = _skeleton(expected)
+        actual = ""
+        for index in range(max(1, attempts)):
+            try:
+                actual = str(await locator.input_value())
+            except Exception:
+                actual = str(await locator.evaluate(
+                    "el => el.value ?? el.innerText ?? el.textContent ?? ''"))
+            # 快路径:真正的 <input>/<textarea>(标题)本来就该逐字相等
+            if actual == expected or _skeleton(actual) == want:
+                return
+            if index + 1 < attempts:
+                await self._pause(0.08, 0.2)
+
+        got = _skeleton(actual)
+        if not got:
+            raise RuntimeError("小红书文本没写进输入框(可能失焦,或者选错了控件)")
+        if want.startswith(got):
+            raise RuntimeError(
+                f"小红书文本被截断:期望 {len(want)} 字,实际只进去 {len(got)} 字")
+        at = next((i for i, (a, b) in enumerate(zip(want, got)) if a != b),
+                  min(len(want), len(got)))
+        # 只摘一小段:错误信息会进日志和面板,正文整段贴出去没必要
+        raise RuntimeError(
+            f"小红书文本输入结果与预期不一致:期望 {len(want)} 字、实际 {len(got)} 字,"
+            f"第 {at + 1} 字起对不上「{got[at:at + 20]}」")
 
     async def scroll_step(self, page: Any, *, direction: int = 1) -> int:
         # Triangular sampling avoids a flat machine-like distribution while
