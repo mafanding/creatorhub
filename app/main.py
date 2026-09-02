@@ -9925,7 +9925,22 @@ async def pull_ai_facts(body: AiFactsPullIn):
         facts = await ai_jobs.pull_facts(brand)
     except AiError as e:
         raise HTTPException(400, str(e))
-    return {"facts": facts.text, "keys": facts.keys, "note": facts.note}
+    payload = {"facts": facts.text, "keys": facts.keys, "note": facts.note}
+    if facts.recipe:
+        # 现认的配方已经存回人设了,回传一份让前端把配置框刷新掉 ——
+        # 不然人看到的还是旧配置,下次一保存就把新配方覆盖回去。
+        payload["recipe"] = facts.recipe
+        payload["config"] = _ai_json(
+            (lambda b: b.facts_config if b else "{}")(
+                _ai_brand_row(body.brand_id)), {})
+    return payload
+
+
+def _ai_brand_row(brand_id: int | None):
+    if not brand_id:
+        return None
+    with get_session() as s:
+        return s.get(AiBrand, brand_id)
 
 
 # ── 人设档案 ─────────────────────────────────────────────────────────────────

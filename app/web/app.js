@@ -7088,7 +7088,14 @@ async function pullAiFacts() {
       $("ai-facts").value = r.facts || "";
       AI_FACTS_KEYS = r.keys || [];
       $("ai-studio-msg").textContent = "素材已拉取：" + (r.note || "");
-      toast("素材已拉取 ✓ 看一眼再生成", "ok", 5000);
+      if (r.recipe) {
+        // 模型现认了一次接口。配方已经存回人设了,把本地这份也刷新掉,
+        // 否则下次编辑人设一保存就会把新配方覆盖回旧的。
+        await refreshAiBrands();
+        toast("素材已拉取 ✓ 顺便认了一次接口，配方已存进人设，建议去编辑人设核对一下", "ok", 9000);
+      } else {
+        toast("素材已拉取 ✓ 看一眼再生成", "ok", 5000);
+      }
     } catch (e) {
       $("ai-studio-msg").textContent = "拉取失败：" + e.message;
       toast("拉取失败：" + e.message, "err", 8000);
@@ -7448,8 +7455,11 @@ async function tryAiBrandSource() {
         body: JSON.stringify({ brand_id: AI_BRAND_ID, source: $("ai-b-source").value, config }),
       });
       $("ai-b-msg").textContent = r.note || "拉取成功";
-      await uiPrompt({ title: "试拉的结果", hint: r.note || "",
-                       value: r.facts, multiline: true, rows: 18 });
+      if (r.config) $("ai-b-source-config").value = JSON.stringify(r.config, null, 2);
+      await uiPrompt({
+        title: r.recipe ? "认出来的配方 + 试拉的结果" : "试拉的结果",
+        hint: (r.note || "") + (r.recipe ? "　配方已填回上面的配置框，核对一下再保存。" : ""),
+        value: r.facts, multiline: true, rows: 18 });
     } catch (e) {
       $("ai-b-msg").textContent = "失败：" + e.message;
       toast("拉取失败：" + e.message, "err", 8000);

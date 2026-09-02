@@ -4,19 +4,26 @@
 抄一遍价格,抄十天就会烦,烦了就会开始让模型「自己发挥」—— 而那正是这套东西
 最不能出的事:读者拿着编出来的价格去店里。
 
-**为什么选品在这一层做,不丢给模型。** 特价每周三才换,而帖子是每天发的。
-把一周不变的池子原样喂给模型,它每天都会挑同一批「折扣最狠的」,于是一周七篇
-长得几乎一样 —— 这是一眼能看出来的机器特征。所以选品带两件事:
-按折扣深度**加权随机**(深的更容易中,但不保证),以及排除最近几篇已经写过的条目。
+**为什么这里没有「一个站点一个模块」。** 那样加一个项目就得加一段代码,代码只会
+越堆越多,而真正跟站点有关的其实只有一件事:*怎么从这坨 JSON 里认出条目和数值*。
+那一件事被写成了**配方**(`recipe.py` 执行,`paths.py` 求值),配方是配置 ——
+可以人写,也可以让模型看一段返回样本写出来。**加一个新项目 = 一份配方,不是一段代码。**
 
-加一个新站点 = 在这个包里加一个模块 + 在 `_SOURCES` 里登记。产出必须是同一种
-`Facts`(一段人和模型都读得懂的文本 + 一串去重用的 id)—— 下游是语言模型,
-统一成文本比各搞各的结构化格式有用得多。
+所以这里只有一个真正的源(`http_recipe`),外加 `presets/` 里几份写好的配方。
+预设也只是配置文件,不是代码。
+
+`Facts` 是所有源统一的产出:一段人和模型都读得懂的文本 + 一串去重用的 id ——
+下游是语言模型,统一成文本比各搞各的结构化格式有用得多。
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
 from typing import Awaitable, Callable
+
+PRESETS_DIR = Path(__file__).resolve().parent / "presets"
 
 
 @dataclass
@@ -24,13 +31,15 @@ class Facts:
     """一次拉取的产出。
 
     `text` 直接进创作的素材框 —— 所以它得是人也能一眼看懂、能自己改的文本,
-    不是一坨 JSON。`keys` 是这次用掉的条目 id(商品 SKU 之类),存进草稿,
-    下一篇拉取时排除掉。
+    不是一坨 JSON。`keys` 是这次用掉的条目 id,存进草稿,下一篇拉取时排除掉。
+    `recipe` 只在模型现认了一次接口时才有值 —— 调用方应该把它存回人设,
+    这样第二天起就不必再花那次钱,而且配方摆在那里是人能核对的。
     """
 
     text: str
     keys: list[str] = field(default_factory=list)
     note: str = ""          # 一句话进度,给面板和日志看
+    recipe: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -46,10 +55,27 @@ class SourceError(RuntimeError):
     """拉取失败,带一句人能看懂的原因。"""
 
 
+@lru_cache(maxsize=1)
 def _specs() -> dict[str, SourceSpec]:
-    from . import woolworths
+    from . import http_recipe
 
-    return {s.name: s for s in (woolworths.SPEC,)}
+    out: dict[str, SourceSpec] = {http_recipe.SPEC.name: http_recipe.SPEC}
+    # 预设 = 一份写好的配方。坏掉的预设**跳过就好**,不要让整个面板打不开 ——
+    # 一个 JSON 少了个逗号不该变成「AI 创作用不了」。
+    for path in sorted(PRESETS_DIR.glob("*.json")):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            config = raw["config"]
+        except (ValueError, KeyError, OSError):
+            continue
+        out[path.stem] = SourceSpec(
+            name=path.stem,
+            label=str(raw.get("label") or path.stem),
+            summary=str(raw.get("summary") or ""),
+            default_config={**http_recipe.DEFAULT_CONFIG, **config},
+            fetch=http_recipe.fetch,
+        )
+    return out
 
 
 def available() -> dict[str, SourceSpec]:
@@ -65,7 +91,11 @@ def spec(name: str) -> SourceSpec:
 
 async def fetch(name: str, config: dict | None = None, *,
                 exclude: list[str] | None = None, seed: str | None = None) -> Facts:
-    """拉一次。`exclude` 是最近几篇用过的条目 id,`seed` 只给测试用(让抽签可复现)。"""
+    """拉一次。
+
+    `exclude` 是最近几篇用过的条目 id,**最近的排在前面**(见底时按「隔得最久的
+    先回来」补齐)。`seed` 只给测试用,让抽签可复现。
+    """
     s = spec(name)
     merged = {**s.default_config, **(config or {})}
     return await s.fetch(merged, exclude=list(exclude or []), seed=seed)

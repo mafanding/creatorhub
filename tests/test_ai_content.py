@@ -670,34 +670,187 @@ class SweepInterruptedTests(unittest.TestCase):
         self.assertEqual(jobs.recent_titles(None), [])
 
 
-class WoolworthsSourceTests(unittest.TestCase):
-    # 素材源是这条链上唯一碰真实价格的地方 —— 抄错一个数,读者就白跑一趟。
-    def _payload(self, n=10):
+class PathExpressionTests(unittest.TestCase):
+    DATA = {"sku": "S1", "name": "  a   b ", "unit": "Each",
+            "size": {"volumeSize": ""},
+            "price": {"salePrice": 7.0, "pct": 33},
+            "images": {"big": "http://x/a.jpg?impolicy=p&w=200&h=200"},
+            "tags": ["x", "y"]}
+
+    def ev(self, expr):
+        from app.ai.paths import evaluate
+        return evaluate(self.DATA, expr)
+
+    def test_dot_path_and_index(self):
+        self.assertEqual(self.ev("price.salePrice"), 7.0)
+        self.assertEqual(self.ev("tags.0"), "x")
+        self.assertIsNone(self.ev("nope.deeper"))
+
+    def test_double_pipe_is_a_fallback_not_a_pipe(self):
+        # 直接 split("|") 会把这个切成三段,取值永远是空 —— 而空值不报错
+        self.assertEqual(self.ev("size.volumeSize || unit"), "Each")
+        self.assertEqual(self.ev("sku || barcode"), "S1")
+        self.assertEqual(self.ev('nope || "兜底"'), "兜底")
+
+    def test_money_pads_two_decimals_without_changing_the_number(self):
+        self.assertEqual(self.ev("price.salePrice | money"), "$7.00")
+        from app.ai.paths import evaluate
+        self.assertEqual(evaluate({"p": "$7.00"}, "p | money"), "$7.00")
+        self.assertEqual(evaluate({"p": "7,00 €"}, "p | money"), "7,00 €")
+
+    def test_resize_swaps_the_image_dimensions(self):
+        self.assertTrue(self.ev("images.big | resize(1200)").endswith("w=1200&h=1200"))
+
+    def test_text_collapses_whitespace(self):
+        self.assertEqual(self.ev("name | text"), "a b")
+
+    def test_unknown_function_is_refused_by_name(self):
+        from app.ai.paths import PathError
+        with self.assertRaises(PathError) as caught:
+            self.ev("sku | eval")
+        self.assertIn("eval", str(caught.exception))
+
+    def test_expression_is_not_an_evaluator(self):
+        # 配方可能是模型写的 —— 它不能变成一个求值器
+        from app.ai.paths import PathError
+        for bad in ("sku | __import__", "sku | open('x')", "a" * 500):
+            with self.assertRaises(PathError):
+                self.ev(bad)
+
+    def test_one_broken_field_does_not_lose_the_whole_record(self):
+        from app.ai.paths import evaluate_fields
+        got = evaluate_fields(self.DATA, {"id": "sku", "bad": "sku | nope"})
+        self.assertEqual(got["id"], "S1")
+        self.assertEqual(got["bad"], "")
+        self.assertIn("bad", got["_errors"])
+
+
+class RecipeEngineTests(unittest.TestCase):
+    def payload(self, n=10):
         items = []
         for i in range(n):
-            pct = 50 - i * 5
             items.append({
                 "type": "Product", "sku": f"sku{i}",
                 "name": f"chicken item {i}" if i % 3 == 0 else f"candy item {i}",
                 "brand": f"brand{i}",
-                "unit": "Each", "size": {"volumeSize": f"{100 + i}g"},
-                "images": {"big": f"https://cdn/x{i}.jpg?impolicy=p&w=200&h=200"},
+                "size": {"volumeSize": f"{100 + i}g"},
+                "images": {"big": f"https://cdn/x{i}.jpg?w=200&h=200"},
                 "price": {"salePrice": 10 - i, "originalPrice": 20 - i,
-                          "savePercentage": pct, "savePrice": 10},
+                          "savePercentage": 50 - i * 5, "savePrice": 10},
             })
         return {"products": {"items": items}}
 
-    def _fetch(self, payload=None, *, config=None, exclude=(), seed="t"):
-        from app.ai.sources import woolworths
+    RECIPE = {
+        "items_path": "products.items",
+        "keep": {"type": "Product"},
+        "fields": {"id": "sku", "name": "name | text", "brand": "brand",
+                   "size": "size.volumeSize", "now": "price.salePrice | money",
+                   "off": "price.savePercentage | int",
+                   "image": "images.big | resize(1200)"},
+        "score": "price.savePercentage",
+        "min_score": 30, "pick": 3, "unique_by": "brand",
+        "line": "{name}（{size}） {now}｜{off}% OFF",
+    }
+
+    def go(self, recipe=None, payload=None, exclude=(), seed="t"):
+        from app.ai.sources import recipe as rc
+        return rc.run(payload or self.payload(), {**self.RECIPE, **(recipe or {})},
+                      exclude=list(exclude), seed=seed)
+
+    def test_values_are_copied_by_code_not_retyped(self):
+        text, keys, note = self.go()
+        self.assertIn("$10.00", text)
+        self.assertIn("50% OFF", text)
+        self.assertIn("w=1200&h=1200", text)
+        self.assertEqual(len(keys), 3)
+
+    def test_keep_filters_out_non_items(self):
+        payload = self.payload(4)
+        payload["products"]["items"][0]["type"] = "Ad"
+        _text, keys, _ = self.go({"pick": 3, "min_score": 0}, payload)
+        self.assertNotIn("sku0", keys)
+
+    def test_records_without_id_or_name_are_dropped(self):
+        payload = self.payload(4)
+        payload["products"]["items"][0]["sku"] = ""
+        _text, keys, _ = self.go({"pick": 3, "min_score": 0}, payload)
+        self.assertEqual(len(keys), 3)
+
+    def test_wrong_items_path_says_so_instead_of_producing_nothing(self):
+        from app.ai.sources.recipe import RecipeError
+        with self.assertRaises(RecipeError) as caught:
+            self.go({"items_path": "products.nope"})
+        self.assertIn("items_path", str(caught.exception))
+
+    def test_stale_field_paths_are_reported_not_silently_empty(self):
+        from app.ai.sources.recipe import RecipeError
+        with self.assertRaises(RecipeError) as caught:
+            self.go({"fields": {"id": "gone", "name": "alsogone"}})
+        self.assertIn("一条记录都没取出来", str(caught.exception))
+
+    def test_missing_required_field_in_the_recipe_is_refused(self):
+        from app.ai.sources.recipe import RecipeError
+        with self.assertRaises(RecipeError) as caught:
+            self.go({"fields": {"name": "name"}})
+        self.assertIn("id", str(caught.exception))
+
+    def test_excluded_ids_are_not_picked_again(self):
+        _t, first, _n = self.go({"pick": 2}, seed="a")
+        _t, again, _n = self.go({"pick": 2}, exclude=first, seed="a")
+        self.assertFalse(set(first) & set(again))
+
+    def test_different_seeds_give_different_combinations(self):
+        combos = {tuple(sorted(self.go(seed=f"d{i}")[1])) for i in range(8)}
+        self.assertGreater(len(combos), 1)
+
+    def test_running_out_reuses_the_oldest_and_says_so(self):
+        text, keys, _n = self.go({"pick": 3}, exclude=[f"sku{i}" for i in range(10)])
+        self.assertEqual(len(keys), 3)
+        self.assertIn("最近发过", text)
+
+    def test_thin_day_relaxes_the_threshold_and_says_so(self):
+        text, _k, _n = self.go({"min_score": 48, "pick": 3}, self.payload(3))
+        self.assertIn("门槛已放宽", text)
+
+    def test_unique_by_stops_the_same_brand_twice(self):
+        payload = self.payload(6)
+        for it in payload["products"]["items"]:
+            it["brand"] = "同一个牌子"
+        _t, keys, _n = self.go({"pick": 3, "min_score": 0}, payload)
+        self.assertEqual(len(keys), 1)
+
+    def test_boost_keywords_pull_matching_records_up(self):
+        hits = 0
+        for i in range(30):
+            _t, keys, _n = self.go(
+                {"pick": 1, "min_score": 0, "boost": 4.0,
+                 "boost_keywords": ["chicken"]}, seed=f"s{i}")
+            if keys[0] in ("sku0", "sku3", "sku6", "sku9"):
+                hits += 1
+        self.assertGreater(hits, 6, "关键词加权看起来没生效")
+
+    def test_a_typo_in_the_line_template_is_visible_not_fatal(self):
+        text, _k, _n = self.go({"line": "{name} {nosuchfield}"})
+        self.assertIn("{nosuchfield?}", text)
+
+
+class HttpRecipeSourceTests(unittest.TestCase):
+    PAYLOAD = {"products": {"items": [
+        {"type": "Product", "sku": "a1", "name": "thing",
+         "price": {"salePrice": 3.5, "savePercentage": 40}}]}}
+
+    def _patch_get(self, payload=None, cls=None):
+        from app.ai.sources import http_recipe
+
+        seen = {}
+        body = self.PAYLOAD if payload is None else payload
 
         class Resp:
             status_code = 200
             text = ""
 
             def json(self):
-                return payload if payload is not None else self_payload
-
-        self_payload = self._payload()
+                return body
 
         class Client:
             def __init__(self, **kw):
@@ -710,80 +863,89 @@ class WoolworthsSourceTests(unittest.TestCase):
                 return False
 
             async def get(self, url, headers=None):
-                Client.seen = {"url": url, "headers": headers or {}}
+                seen["url"], seen["headers"] = url, headers or {}
                 return Resp()
 
-        self.client = Client
-        with patch.object(woolworths.httpx, "AsyncClient", Client):
-            return asyncio.run(woolworths.fetch(
-                {**woolworths.DEFAULT_CONFIG, **(config or {})},
-                exclude=list(exclude), seed=seed))
+        return patch.object(http_recipe.httpx, "AsyncClient", cls or Client), seen
 
-    def test_prices_are_copied_verbatim_and_images_upsized(self):
-        facts = self._fetch()
-        self.assertIn("$10.00", facts.text)      # salePrice 10 → 补两位小数
-        self.assertIn("50% OFF", facts.text)
-        self.assertIn("w=1200&h=1200", facts.text)
-        self.assertNotIn("w=200&h=200", facts.text)
+    RECIPE = {"items_path": "products.items",
+              "fields": {"id": "sku", "name": "name", "now": "price.salePrice | money"},
+              "score": "price.savePercentage", "line": "{name} {now}"}
 
-    def test_sends_the_header_that_the_api_needs(self):
-        self._fetch()
-        self.assertEqual(self.client.seen["headers"].get("x-requested-with"),
-                         "OnlineShopping.WebApp")
+    def test_a_stored_recipe_is_used_without_calling_the_model(self):
+        from app.ai.sources import http_recipe
 
-    def test_picks_the_requested_count_and_reports_keys(self):
-        facts = self._fetch(config={"pick": 3})
-        self.assertEqual(len(facts.keys), 3)
-        self.assertEqual(len(set(facts.keys)), 3)
+        async def boom(*a, **k):
+            raise AssertionError("配方还在,不该再去问模型")
 
-    def test_excluded_skus_are_not_picked_again(self):
-        first = self._fetch(config={"pick": 2}, seed="a")
-        again = self._fetch(config={"pick": 2}, exclude=first.keys, seed="a")
-        self.assertFalse(set(first.keys) & set(again.keys))
+        ctx, seen = self._patch_get()
+        with ctx, patch.object(http_recipe, "derive_recipe", boom):
+            facts = asyncio.run(http_recipe.fetch(
+                {**http_recipe.DEFAULT_CONFIG, "url": "https://x/api", **self.RECIPE},
+                exclude=[]))
+        self.assertIn("$3.50", facts.text)
+        self.assertIsNone(facts.recipe)
+        self.assertEqual(seen["url"], "https://x/api")
 
-    def test_different_days_give_different_combinations(self):
-        combos = {tuple(sorted(self._fetch(config={"pick": 3}, seed=f"day{i}").keys))
-                  for i in range(8)}
-        # 特价一周才换一次;按折扣排序的话这里会只有 1 种组合
-        self.assertGreater(len(combos), 1)
+    def test_no_recipe_yet_asks_the_model_and_returns_it_for_saving(self):
+        from app.ai.sources import http_recipe
 
-    def test_running_out_of_fresh_items_reuses_the_oldest_and_says_so(self):
-        every = [f"sku{i}" for i in range(10)]
-        facts = self._fetch(config={"pick": 3}, exclude=every)
-        self.assertEqual(len(facts.keys), 3)
-        self.assertIn("最近发过", facts.text)
+        async def fake_derive(payload, config):
+            return dict(self.RECIPE)
 
-    def test_relaxes_the_threshold_when_the_week_is_thin_and_says_so(self):
-        payload = self._payload(2)          # 只有 50% 和 45% 两样
-        facts = self._fetch(payload, config={"pick": 3, "min_percent": 48})
-        self.assertIn("门槛已放宽", facts.text)
+        ctx, _seen = self._patch_get()
+        with ctx, patch.object(http_recipe, "derive_recipe", fake_derive):
+            facts = asyncio.run(http_recipe.fetch(
+                {**http_recipe.DEFAULT_CONFIG, "url": "https://x/api"}, exclude=[]))
+        self.assertEqual(facts.recipe, self.RECIPE)
+        self.assertIn("认了一次接口", facts.note)
 
-    def test_same_brand_is_not_picked_twice(self):
-        payload = self._payload(6)
-        for it in payload["products"]["items"]:
-            it["brand"] = "同一个牌子"
-        facts = self._fetch(payload, config={"pick": 3})
-        self.assertEqual(len(facts.keys), 1)
+    def test_a_stale_recipe_triggers_a_re_read_and_says_why(self):
+        from app.ai.sources import http_recipe
 
-    def test_staple_keywords_pull_everyday_items_up(self):
-        # chicken 那几样折扣更浅,靠加权才上得来;跑多次看它出现的频率
-        hits = 0
-        for i in range(30):
-            facts = self._fetch(config={"pick": 1, "min_percent": 0}, seed=f"s{i}")
-            if any(k in ("sku0", "sku3", "sku6", "sku9") for k in facts.keys):
-                hits += 1
-        self.assertGreater(hits, 6, "日常品加权看起来没生效")
+        async def fake_derive(payload, config):
+            return dict(self.RECIPE)
 
-    def test_items_without_a_price_are_dropped(self):
-        payload = self._payload(4)
-        payload["products"]["items"][0]["price"] = {}
-        facts = self._fetch(payload, config={"pick": 3, "min_percent": 0})
-        self.assertNotIn("sku0", facts.keys)
+        stale = {**self.RECIPE, "items_path": "products.gone"}
+        ctx, _seen = self._patch_get()
+        with ctx, patch.object(http_recipe, "derive_recipe", fake_derive):
+            facts = asyncio.run(http_recipe.fetch(
+                {**http_recipe.DEFAULT_CONFIG, "url": "https://x/api", **stale},
+                exclude=[]))
+        self.assertIn("原配方用不了", facts.note)
+        self.assertEqual(facts.recipe, self.RECIPE)
 
-    def test_http_error_becomes_a_readable_message(self):
-        from app.ai.sources import woolworths, SourceError
+    def test_a_model_recipe_that_still_extracts_nothing_is_an_error(self):
+        from app.ai.sources import http_recipe, SourceError
 
-        class Boom:
+        async def bad_derive(payload, config):
+            return {"items_path": "products.items",
+                    "fields": {"id": "ghost", "name": "ghost"}}
+
+        ctx, _seen = self._patch_get()
+        with ctx, patch.object(http_recipe, "derive_recipe", bad_derive):
+            with self.assertRaises(SourceError) as caught:
+                asyncio.run(http_recipe.fetch(
+                    {**http_recipe.DEFAULT_CONFIG, "url": "https://x/api"}, exclude=[]))
+        self.assertIn("模型给的配方", str(caught.exception))
+
+    def test_missing_url_is_refused_before_any_request(self):
+        from app.ai.sources import http_recipe, SourceError
+        with self.assertRaises(SourceError) as caught:
+            asyncio.run(http_recipe.fetch(dict(http_recipe.DEFAULT_CONFIG), exclude=[]))
+        self.assertIn("url", str(caught.exception))
+
+    def test_non_json_response_points_at_the_headers(self):
+        from app.ai.sources import http_recipe, SourceError
+
+        class Resp:
+            status_code = 200
+            text = "<html>登录页</html>"
+
+            def json(self):
+                raise ValueError("not json")
+
+        class Client:
             def __init__(self, **kw):
                 pass
 
@@ -794,12 +956,43 @@ class WoolworthsSourceTests(unittest.TestCase):
                 return False
 
             async def get(self, url, headers=None):
-                raise woolworths.httpx.ConnectError("nope")
+                return Resp()
 
-        with patch.object(woolworths.httpx, "AsyncClient", Boom):
+        with patch.object(http_recipe.httpx, "AsyncClient", Client):
             with self.assertRaises(SourceError) as caught:
-                asyncio.run(woolworths.fetch(woolworths.DEFAULT_CONFIG, exclude=[]))
-        self.assertIn("连不上", str(caught.exception))
+                asyncio.run(http_recipe.fetch(
+                    {**http_recipe.DEFAULT_CONFIG, "url": "https://x/api"}, exclude=[]))
+        self.assertIn("headers", str(caught.exception))
+
+
+class PresetTests(unittest.TestCase):
+    def test_every_preset_is_loadable_and_has_a_working_shape(self):
+        from app.ai import sources
+        from app.ai.sources.recipe import REQUIRED_FIELDS
+        specs = sources.available()
+        self.assertIn("http_recipe", specs)
+        presets = [s for n, s in specs.items() if n != "http_recipe"]
+        self.assertTrue(presets, "一份预设都没有")
+        for s in presets:
+            cfg = s.default_config
+            self.assertTrue(cfg.get("url", "").startswith("http"), s.name)
+            for key in REQUIRED_FIELDS:
+                self.assertIn(key, cfg.get("fields", {}), f"{s.name} 缺 {key}")
+
+    def test_the_woolworths_preset_extracts_from_a_real_shaped_payload(self):
+        from app.ai import sources
+        from app.ai.sources import recipe as rc
+        cfg = sources.spec("woolworths_nz_specials").default_config
+        payload = {"products": {"items": [{
+            "type": "Product", "sku": "1", "name": "cadbury block", "brand": "cadbury",
+            "unit": "Each", "size": {"volumeSize": "170g"},
+            "images": {"big": "https://cdn/a.jpg?impolicy=p&w=200&h=200"},
+            "price": {"salePrice": 3.49, "originalPrice": 7.0,
+                      "savePercentage": 50, "savePrice": 3.51}}]}}
+        text, keys, _note = rc.run(payload, {**cfg, "pick": 1}, exclude=[])
+        self.assertEqual(keys, ["1"])
+        for expected in ("$3.49", "$7.00", "50% OFF", "$3.51", "170g", "w=1200&h=1200"):
+            self.assertIn(expected, text)
 
 
 class FactsSourceWiringTests(unittest.TestCase):
@@ -849,6 +1042,44 @@ class FactsSourceWiringTests(unittest.TestCase):
         self.assertEqual(got.keys, ["k1"])
         self.assertEqual(seen["config"], {"pick": 2})
         self.assertEqual(seen["name"], "woolworths_nz_specials")
+
+    def test_a_derived_recipe_is_saved_back_onto_the_brand(self):
+        # 不存回去的话,每天都要为同一个接口再付一次认接口的钱,
+        # 而且那份配方谁也看不见、改不动。
+        with db.get_session() as s:
+            b = AiBrand(name="x", facts_source="http_recipe",
+                        facts_config=json.dumps({"url": "https://x/api"}))
+            s.add(b); s.commit(); s.refresh(b)
+            bid = b.id
+            brand = AiBrand(**{k: getattr(b, k) for k in AiBrand.model_fields})
+
+        async def fake(name, config, *, exclude, seed=None):
+            return jobs.sources.Facts(text="素材", keys=["k"], note="n",
+                                      recipe={"items_path": "a", "fields": {"id": "i"}})
+
+        with patch.object(jobs.sources, "fetch", fake):
+            asyncio.run(jobs.pull_facts(brand))
+        with db.get_session() as s:
+            saved = json.loads(s.get(AiBrand, bid).facts_config)
+        self.assertEqual(saved["url"], "https://x/api")     # 原有的键保留
+        self.assertEqual(saved["items_path"], "a")          # 新配方合并进去
+
+    def test_no_recipe_means_the_brand_config_is_left_alone(self):
+        with db.get_session() as s:
+            b = AiBrand(name="x", facts_source="http_recipe",
+                        facts_config=json.dumps({"url": "https://x/api"}))
+            s.add(b); s.commit(); s.refresh(b)
+            bid = b.id
+            brand = AiBrand(**{k: getattr(b, k) for k in AiBrand.model_fields})
+
+        async def fake(name, config, *, exclude, seed=None):
+            return jobs.sources.Facts(text="素材", keys=["k"], note="n")
+
+        with patch.object(jobs.sources, "fetch", fake):
+            asyncio.run(jobs.pull_facts(brand))
+        with db.get_session() as s:
+            self.assertEqual(json.loads(s.get(AiBrand, bid).facts_config),
+                             {"url": "https://x/api"})
 
     def test_unknown_source_is_a_readable_error(self):
         b = AiBrand(name="x", facts_source="no-such-source")

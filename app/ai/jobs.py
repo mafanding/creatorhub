@@ -114,8 +114,13 @@ def recent_source_keys(brand_id: int | None, limit: int = 6) -> list[str]:
     return list(dict.fromkeys(keys))
 
 
-async def pull_facts(brand: AiBrand, *, exclude: list[str] | None = None) -> sources.Facts:
-    """按人设配的素材源拉一次。没配源就抛错 —— 调用方该先判断。"""
+async def pull_facts(brand: AiBrand, *, exclude: list[str] | None = None,
+                     save_recipe: bool = True) -> sources.Facts:
+    """按人设配的素材源拉一次。没配源就抛错 —— 调用方该先判断。
+
+    模型现认了一次接口时(`Facts.recipe` 有值),把配方**存回人设** ——
+    否则每天都要为同一个接口再付一次钱,而且那份配方谁也看不见、改不动。
+    """
     if not (brand and (brand.facts_source or "").strip()):
         raise AiError("这个人设没有配素材源")
     try:
@@ -127,9 +132,21 @@ async def pull_facts(brand: AiBrand, *, exclude: list[str] | None = None) -> sou
     if exclude is None:
         exclude = recent_source_keys(brand.id, brand.facts_dedup_drafts)
     try:
-        return await sources.fetch(brand.facts_source, config, exclude=exclude)
+        facts = await sources.fetch(brand.facts_source, config, exclude=exclude)
     except sources.SourceError as exc:
         raise AiError(str(exc)) from exc
+
+    if facts.recipe and save_recipe and brand.id:
+        merged = {**config, **facts.recipe}
+        with get_session() as s:
+            row = s.get(AiBrand, brand.id)
+            if row is not None:
+                row.facts_config = json.dumps(merged, ensure_ascii=False)
+                row.updated_at = datetime.utcnow()
+                s.add(row)
+                s.commit()
+        brand.facts_config = json.dumps(merged, ensure_ascii=False)
+    return facts
 
 
 def recent_titles(brand_id: int | None, limit: int = 12) -> list[str]:
