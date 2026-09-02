@@ -222,3 +222,92 @@ class DmAutomationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DmAutoReplyRuleApiTests(unittest.TestCase):
+    """私信自动回复规则的三个接口。
+
+    它们此前零覆盖,于是一个**同名函数遮蔽**在线上才被发现:`app/main.py` 里
+    有两个顶层 `_rule_dict`,后定义的那个(评论规则用)把前面那个(私信规则用)
+    盖掉了,三个接口全部 500 —— 而 pyflakes 早就报了 "redefinition of unused"。
+    """
+
+    def setUp(self):
+        import asyncio
+        import app.main as main
+        self.asyncio, self.main = asyncio, main
+        self.previous_engine = db._engine
+        self.tmp = tempfile.TemporaryDirectory()
+        db.init_db(str(Path(self.tmp.name) / "dm-rules.db"))
+        with db.get_session() as session:
+            account = DouyinAccount(platform="xhs", nickname="私信号",
+                                    status="active", storage_state="{}")
+            session.add(account)
+            session.commit()
+            session.refresh(account)
+            self.account_id = account.id
+
+    def tearDown(self):
+        if db._engine is not None:
+            db._engine.dispose()
+        db._engine = self.previous_engine
+        self.tmp.cleanup()
+
+    def _body(self, **over):
+        fields = {
+            "account_id": self.account_id, "name": "问价自动回", "match_mode": "keywords",
+            "keywords": ["多少钱", "怎么拿"], "exclude_keywords": ["退款"],
+            "reply_templates": ["主页简介里写了面交范围"],
+        }
+        fields.update(over)
+        return self.main.DmAutoReplyRuleIn(**fields)
+
+    def test_create_list_and_update_round_trip(self):
+        created = self.asyncio.run(self.main.create_dm_auto_reply_rule(self._body()))
+        self.assertEqual(created["name"], "问价自动回")
+        self.assertEqual(created["keywords"], ["多少钱", "怎么拿"])
+        self.assertEqual(created["exclude_keywords"], ["退款"])
+        self.assertEqual(created["reply_templates"], ["主页简介里写了面交范围"])
+        self.assertTrue(created["review_before_send"])
+
+        listed = self.asyncio.run(
+            self.main.list_dm_auto_reply_rules(self.account_id))
+        self.assertEqual([r["id"] for r in listed], [created["id"]])
+
+        updated = self.asyncio.run(self.main.update_dm_auto_reply_rule(
+            created["id"], self._body(name="改过的", enabled=False)))
+        self.assertEqual(updated["name"], "改过的")
+        self.assertFalse(updated["enabled"])
+
+    def test_serialised_rule_carries_dm_fields_not_comment_fields(self):
+        # 遮蔽发生时这里拿到的是评论规则的形状(mode / templates / use_ai),
+        # 而且多半直接 AttributeError。
+        created = self.asyncio.run(self.main.create_dm_auto_reply_rule(self._body()))
+        for key in ("match_mode", "reply_templates", "review_before_send",
+                    "cooldown_seconds", "max_message_age_seconds"):
+            self.assertIn(key, created)
+        for key in ("mode", "templates", "use_ai", "target_kind"):
+            self.assertNotIn(key, created)
+
+    def test_delete_removes_the_rule(self):
+        created = self.asyncio.run(self.main.create_dm_auto_reply_rule(self._body()))
+        self.asyncio.run(self.main.delete_dm_auto_reply_rule(created["id"]))
+        self.assertEqual(
+            self.asyncio.run(self.main.list_dm_auto_reply_rules(self.account_id)), [])
+
+
+class MainModuleShapeTests(unittest.TestCase):
+    def test_no_top_level_name_is_defined_twice_in_main(self):
+        """`app/main.py` 有一万行,同名顶层定义不会报错,只会让后定义的那个
+        **静默盖掉**前面那个 —— 表现是某几个接口 500,而代码看起来完全正常。
+        真出过一次(两个 `_rule_dict`),所以这里钉住。"""
+        import ast
+        import collections
+        source = (Path(__file__).parents[1] / "app" / "main.py").read_text(
+            encoding="utf-8")
+        seen = collections.defaultdict(list)
+        for node in ast.parse(source).body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                seen[node.name].append(node.lineno)
+        dupes = {name: lines for name, lines in seen.items() if len(lines) > 1}
+        self.assertEqual(dupes, {}, f"顶层重名会静默遮蔽: {dupes}")
