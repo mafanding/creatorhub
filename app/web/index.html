@@ -3545,7 +3545,7 @@
       <div class="form-field" id="ai-b-source-config-wrap" style="display:none">
         <label for="ai-b-source-config">素材源配置（JSON）</label>
         <textarea id="ai-b-source-config" rows="8" spellcheck="false" style="font-family:var(--mono);font-size:12px"></textarea>
-        <div class="field-help">留空的键用源自己的默认值。改完可以点下面「试拉一次」看看结果</div>
+        <div class="field-help">这里就是「取数配方」：<code>items_path</code> 说条目在哪，<code>fields</code> 说每个字段怎么取（<code>price.salePrice | money</code> 这种点路径 + 管道函数）。留空的键用源自己的默认值。<b>不会写就把 fields 清空、在下面「我要什么」里写一句话，点「试拉一次」让 AI 认一遍</b></div>
       </div>
     </div>
     <div class="row" style="justify-content:flex-end;gap:8px;margin-top:12px">

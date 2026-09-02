@@ -1,0 +1,44 @@
+{
+  "label": "Woolworths NZ 本周特价",
+  "summary": "拉 Woolworths 新西兰的公开特价接口。配方是写好的，开箱即用，不需要让模型认接口。价格和商品图都由代码照抄，按折扣深度加权随机挑几样，自动避开最近几篇写过的。",
+  "config": {
+    "url": "https://www.woolworths.co.nz/api/v1/products?target=specials&size=48",
+    "headers": {
+      "x-requested-with": "OnlineShopping.WebApp",
+      "Accept": "application/json"
+    },
+    "prompt": "取出每样特价商品的名字、规格、现价、原价、折扣百分比、省多少钱和商品图。",
+    "items_path": "products.items",
+    "keep": { "type": "Product" },
+    "fields": {
+      "id": "sku || barcode",
+      "name": "name | text",
+      "brand": "brand | text",
+      "size": "size.volumeSize || unit",
+      "now": "price.salePrice | money",
+      "was": "price.originalPrice | money",
+      "off": "price.savePercentage | int",
+      "save": "price.savePrice | money",
+      "image": "images.big | resize(1200)"
+    },
+    "score": "price.savePercentage",
+    "min_score": 33,
+    "pick": 3,
+    "pool_shown": 12,
+    "unique_by": "brand",
+    "boost": 2.5,
+    "boost_keywords": [
+      "chicken", "beef", "pork", "lamb", "mince", "sausage", "bacon", "fish", "salmon",
+      "egg", "milk", "cheese", "butter", "yoghurt", "cream",
+      "bread", "rice", "pasta", "flour", "oil", "sauce", "noodle",
+      "vegetable", "potato", "onion", "tomato", "fruit", "banana", "apple",
+      "toilet paper", "tissue", "towel", "nappies", "detergent", "washing",
+      "coffee", "tea", "frozen"
+    ],
+    "line": "{name}（{size}） 现价 {now}｜原价 {was}｜{off}% OFF｜省 {save}",
+    "image_field": "image",
+    "label": "Woolworths 本周特价",
+    "caveat": "Woolworths 全国特价接口，不分门店；特价每周三换新",
+    "intro": "正文里的每一个价格都只能从下面照抄。接口已经把现价、原价、折扣百分比和省多少四个数都给了 —— **一个都不要自己算**，折扣百分比尤其不要拿原价现价去除。商品名是接口给的英文原名，写进正文和卡片时翻成中文说清楚是什么，别照抄英文；但**不要改规格和价格**。"
+  }
+}
