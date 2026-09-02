@@ -2669,7 +2669,10 @@
         <div class="form-field">
           <label for="ai-facts">真实素材（正文里唯一可信的数字来源）</label>
           <textarea id="ai-facts" rows="4" placeholder="把今天的真实数据、活动细则、你自己的经历贴进来…"></textarea>
-          <div class="field-help">不填就不会出现任何具体金额/比例/截止日 —— 编一个数字的代价是读者真花的钱</div>
+          <div class="row" style="justify-content:space-between;align-items:center;gap:10px;margin-top:6px">
+            <span class="field-help" style="margin:0" id="ai-facts-help">不填就不会出现任何具体金额/比例/截止日 —— 编一个数字的代价是读者真花的钱</span>
+            <button class="ghost sm" id="ai-facts-pull" onclick="pullAiFacts()" style="flex:0 0 auto;display:none"><svg><use href="#i-download"/></svg>拉取今天的素材</button>
+          </div>
         </div>
         <div class="form-note">
           <svg aria-hidden="true"><use href="#i-info"/></svg>
@@ -3527,10 +3530,28 @@
         <div id="ai-b-templates" class="row" style="flex-wrap:wrap;gap:10px"></div>
         <div class="field-help">一个都不勾 = 全部可用</div>
       </div>
+      <div class="form-grid">
+        <div class="form-field">
+          <label for="ai-b-source">素材源</label>
+          <select id="ai-b-source" onchange="onAiBrandSource()"></select>
+          <div class="field-help" id="ai-b-source-help">选了之后，生成时会自动拉当天的真实数据填进素材框；素材框里手填了东西就不覆盖</div>
+        </div>
+        <div class="form-field">
+          <label for="ai-b-dedup">往前避开几篇</label>
+          <input id="ai-b-dedup" type="number" min="0" max="60" placeholder="6">
+          <div class="field-help">最近这几篇用过的条目不再抽，避免一周七篇写同样的商品</div>
+        </div>
+      </div>
+      <div class="form-field" id="ai-b-source-config-wrap" style="display:none">
+        <label for="ai-b-source-config">素材源配置（JSON）</label>
+        <textarea id="ai-b-source-config" rows="8" spellcheck="false" style="font-family:var(--mono);font-size:12px"></textarea>
+        <div class="field-help">留空的键用源自己的默认值。改完可以点下面「试拉一次」看看结果</div>
+      </div>
     </div>
     <div class="row" style="justify-content:flex-end;gap:8px;margin-top:12px">
       <span class="mut" id="ai-b-msg" style="margin-right:auto;font-size:12px"></span>
       <button class="ghost danger" id="ai-b-del" onclick="deleteAiBrand()" style="flex:0 0 auto"><svg><use href="#i-trash"/></svg>删除</button>
+      <button class="ghost" id="ai-b-try" onclick="tryAiBrandSource()" style="flex:0 0 auto;display:none"><svg><use href="#i-download"/></svg>试拉一次</button>
       <button onclick="saveAiBrand()" style="flex:0 0 auto"><svg><use href="#i-check"/></svg>保存</button>
     </div>
   </div>

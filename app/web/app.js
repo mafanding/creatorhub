@@ -7025,6 +7025,8 @@ const AI_PILL = { pending: "pending", generating: "downloading", rendering: "dow
 let AI_BRANDS = [];
 let AI_CATALOG = null;
 let AI_DRAFTS = [];
+let AI_SOURCES = null;      // 可用素材源(清单 + 默认配置)
+let AI_FACTS_KEYS = [];     // 这次拉取用掉的条目 id,提交时带上,进去重历史
 let AI_BRAND_ID = null;      // 人设弹窗正在编辑的那一条(null = 新建)
 let AI_DRAFT_ID = null;      // 草稿弹窗正在看的那一篇
 let AI_POLL = null;
@@ -7035,6 +7037,11 @@ function syncSelect(sel) { if (sel && sel._csSync) sel._csSync(); }
 async function aiCatalog() {
   if (!AI_CATALOG) AI_CATALOG = await api("/api/ai/catalog");
   return AI_CATALOG;
+}
+
+async function aiSources() {
+  if (!AI_SOURCES) AI_SOURCES = await api("/api/ai/sources");
+  return AI_SOURCES;
 }
 
 function aiSelectedBrand() {
@@ -7052,6 +7059,41 @@ async function refreshAiBrands() {
   if (AI_BRANDS.some(b => String(b.id) === keep)) sel.value = keep;
   else if (!keep && AI_BRANDS.length) sel.value = String(AI_BRANDS[0].id);
   syncSelect(sel);
+  sel.onchange = onAiBrandPick;
+  onAiBrandPick();
+}
+
+// 选中的人设配了素材源,才给「拉取今天的素材」这个按钮。
+function onAiBrandPick() {
+  const b = aiSelectedBrand();
+  const btn = $("ai-facts-pull");
+  if (btn) btn.style.display = b && b.facts_source ? "" : "none";
+  if ($("ai-facts-help")) {
+    $("ai-facts-help").textContent = b && b.facts_source
+      ? "留空的话，生成时会自动拉当天的数据；想先看一眼就点右边。手填了就以手填的为准。"
+      : "不填就不会出现任何具体金额/比例/截止日 —— 编一个数字的代价是读者真花的钱";
+  }
+}
+
+async function pullAiFacts() {
+  const btn = evtBtn();
+  const b = aiSelectedBrand();
+  if (!b) return;
+  await withBusy(btn, "拉取中", async () => {
+    try {
+      const r = await api("/api/ai/facts/pull", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ brand_id: b.id }),
+      });
+      $("ai-facts").value = r.facts || "";
+      AI_FACTS_KEYS = r.keys || [];
+      $("ai-studio-msg").textContent = "素材已拉取：" + (r.note || "");
+      toast("素材已拉取 ✓ 看一眼再生成", "ok", 5000);
+    } catch (e) {
+      $("ai-studio-msg").textContent = "拉取失败：" + e.message;
+      toast("拉取失败：" + e.message, "err", 8000);
+    }
+  });
 }
 
 async function refreshAiAccounts() {
@@ -7135,6 +7177,7 @@ async function startAiDraft() {
     platform: pfHasPublish(PLATFORM) ? PLATFORM : "xhs",
     direction: $("ai-direction").value.trim(),
     facts: $("ai-facts").value.trim(),
+    source_keys: AI_FACTS_KEYS,
   };
   await withBusy(btn, "提交中", async () => {
     try {
@@ -7144,6 +7187,7 @@ async function startAiDraft() {
       });
       $("ai-studio-msg").textContent = "已排进后台，写稿加渲染大约要一两分钟。";
       toast("开始生成 ✓", "ok");
+      AI_FACTS_KEYS = [];
       AI_DRAFT_ID = null;
       refreshAiDrafts();
     } catch (e) {
@@ -7350,11 +7394,67 @@ async function openAiBrandModal(id) {
     `<label class="row" style="gap:6px;align-items:center;flex:0 0 auto" title="${esc(t.summary)}">
        <input type="checkbox" class="ai-b-tpl" value="${esc(t.name)}"${picked.has(t.name) ? " checked" : ""}>
        <span>${esc(t.name)}</span></label>`).join("");
+  const srcs = await aiSources().catch(() => []);
+  $("ai-b-source").innerHTML = '<option value="">（不用，每次人工粘素材）</option>' +
+    srcs.map(x => `<option value="${esc(x.name)}">${esc(x.label)}</option>`).join("");
+  $("ai-b-source").value = b.facts_source || "";
+  syncSelect($("ai-b-source"));
+  $("ai-b-dedup").value = b.facts_dedup_drafts == null ? 6 : b.facts_dedup_drafts;
+  $("ai-b-source-config").value = b.facts_config && Object.keys(b.facts_config).length
+    ? JSON.stringify(b.facts_config, null, 2) : "";
+  onAiBrandSource(false);
   $("ai-b-del").style.display = AI_BRAND_ID ? "" : "none";
   $("ai-b-msg").textContent = "";
   const modal = $("ai-brand-modal");
   modal.style.display = "flex";
   modalOpened(modal);
+}
+
+// 换素材源时把默认配置填进去 —— 让人看得见有哪些旋钮,而不是对着空框猜。
+// 打开弹窗时传 false:那时框里放的是这个人设已存的配置,不该被默认值顶掉,
+// 也不该给一个还没配过源的人设凭空写死一份「今天的默认值」。
+function onAiBrandSource(prefillDefaults = true) {
+  const name = $("ai-b-source").value;
+  const spec = (AI_SOURCES || []).find(x => x.name === name);
+  $("ai-b-source-config-wrap").style.display = name ? "" : "none";
+  $("ai-b-try").style.display = name ? "" : "none";
+  if ($("ai-b-source-help")) {
+    $("ai-b-source-help").textContent = spec ? spec.summary
+      : "选了之后，生成时会自动拉当天的真实数据填进素材框；素材框里手填了东西就不覆盖";
+  }
+  const box = $("ai-b-source-config");
+  if (spec && prefillDefaults && !box.value.trim()) {
+    box.value = JSON.stringify(spec.default_config, null, 2);
+  }
+}
+
+function aiBrandSourceConfig() {
+  const raw = $("ai-b-source-config").value.trim();
+  if (!raw) return {};
+  const v = JSON.parse(raw);
+  if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("配置要是一个 JSON 对象");
+  return v;
+}
+
+async function tryAiBrandSource() {
+  const btn = evtBtn();
+  let config;
+  try { config = aiBrandSourceConfig(); }
+  catch (e) { $("ai-b-msg").textContent = "配置 JSON 读不了：" + e.message; return; }
+  await withBusy(btn, "拉取中", async () => {
+    try {
+      const r = await api("/api/ai/facts/pull", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ brand_id: AI_BRAND_ID, source: $("ai-b-source").value, config }),
+      });
+      $("ai-b-msg").textContent = r.note || "拉取成功";
+      await uiPrompt({ title: "试拉的结果", hint: r.note || "",
+                       value: r.facts, multiline: true, rows: 18 });
+    } catch (e) {
+      $("ai-b-msg").textContent = "失败：" + e.message;
+      toast("拉取失败：" + e.message, "err", 8000);
+    }
+  });
 }
 
 function hideAiBrandModal() {
@@ -7381,8 +7481,12 @@ async function saveAiBrand() {
     cards_min: Number($("ai-b-cmin").value) || 4,
     cards_max: Number($("ai-b-cmax").value) || 7,
     allowed_templates: [...document.querySelectorAll(".ai-b-tpl:checked")].map(el => el.value),
+    facts_source: $("ai-b-source").value,
+    facts_dedup_drafts: Number($("ai-b-dedup").value) || 0,
   };
   if (!body.name) { $("ai-b-msg").textContent = "先给这个人设起个名字"; return; }
+  try { body.facts_config = aiBrandSourceConfig(); }
+  catch (e) { $("ai-b-msg").textContent = "素材源配置 JSON 读不了：" + e.message; return; }
   await withBusy(btn, "保存中", async () => {
     try {
       const saved = await api(AI_BRAND_ID ? `/api/ai/brands/${AI_BRAND_ID}` : "/api/ai/brands", {

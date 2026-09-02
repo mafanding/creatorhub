@@ -98,7 +98,7 @@ from .models import (ContentRecord, CommentRecord, CommentRule, CommentTask,
                       ShareDownloadRecord, AccountRiskState, RiskEvent, RiskAdminAudit,
                       KeywordCollectionJob, KeywordCollectionContent,
                       KeywordCollectionComment, AiBrand, AiDraft)
-from .ai import catalog as ai_catalog, jobs as ai_jobs
+from .ai import catalog as ai_catalog, jobs as ai_jobs, sources as ai_sources
 from .ai.client import (PROVIDERS as AI_PROVIDERS, AiError,
                         channel_from_settings as ai_channel_from_settings,
                         complete_text as ai_complete_text)
@@ -9753,6 +9753,9 @@ class AiBrandIn(BaseModel):
     cards_min: int = 4
     cards_max: int = 7
     allowed_templates: list[str] = []
+    facts_source: str = ""
+    facts_config: dict = {}
+    facts_dedup_drafts: int = 6
 
 
 class AiDraftIn(BaseModel):
@@ -9761,6 +9764,9 @@ class AiDraftIn(BaseModel):
     platform: str = "xhs"
     direction: str = ""
     facts: str = ""
+    # 素材是在面板上「拉取」来的时候,把那次用掉的条目 id 一起带上 ——
+    # 不带的话这一篇就不进去重历史,明天会再抽到同样的商品。
+    source_keys: list[str] = []
 
 
 class AiDraftUpdate(BaseModel):
@@ -9798,6 +9804,9 @@ def _ai_brand_dict(b: AiBrand) -> dict:
         "tags_strategy": b.tags_strategy, "banned_words": b.banned_words,
         "cards_min": b.cards_min, "cards_max": b.cards_max,
         "allowed_templates": allowed if isinstance(allowed, list) else [],
+        "facts_source": b.facts_source,
+        "facts_config": _ai_json(b.facts_config, {}),
+        "facts_dedup_drafts": b.facts_dedup_drafts,
         "created_at": b.created_at.isoformat() if b.created_at else None,
         "updated_at": b.updated_at.isoformat() if b.updated_at else None,
     }
@@ -9833,6 +9842,7 @@ def _ai_draft_dict(d: AiDraft, *, full: bool = False) -> dict:
             "cards": _ai_json(d.cards_json, []),
             "usage": _ai_json(d.usage_json, {}),
             "content_length": len(d.content or ""),
+            "source_keys": _ai_json(d.source_keys_json, []),
         })
     return out
 
@@ -9873,6 +9883,51 @@ async def ai_content_test(body: AiContentTestIn):
     return {"ok": True, "sample": text[:200], "usage": usage, "model": channel.label}
 
 
+@app.get("/api/ai/sources")
+async def list_ai_sources():
+    """可用的素材源 + 各自的默认配置。配置形状每个源不一样,所以原样交给前端。"""
+    return [{"name": s.name, "label": s.label, "summary": s.summary,
+             "default_config": s.default_config}
+            for s in ai_sources.available().values()]
+
+
+class AiFactsPullIn(BaseModel):
+    brand_id: int | None = None
+    # 建人设时还没保存,就用这两个字段先试拉一次
+    source: str | None = None
+    config: dict | None = None
+
+
+@app.post("/api/ai/facts/pull")
+async def pull_ai_facts(body: AiFactsPullIn):
+    """拉一次当天的素材,返回文本让人过目。**不落库** —— 人可能想改了再用。
+
+    人设已保存时默认排除它最近几篇用过的条目;没保存时不去重(那时也没历史)。
+    """
+    if body.brand_id:
+        with get_session() as s:
+            b = s.get(AiBrand, body.brand_id)
+            if not b:
+                raise HTTPException(404, "人设不存在")
+            brand = AiBrand(**{k: getattr(b, k) for k in AiBrand.model_fields})
+        if body.source is not None:
+            brand.facts_source = (body.source or "").strip()
+        if body.config is not None:
+            brand.facts_config = json.dumps(body.config, ensure_ascii=False)
+    else:
+        brand = AiBrand(
+            facts_source=(body.source or "").strip(),
+            facts_config=json.dumps(body.config or {}, ensure_ascii=False),
+        )
+    if not brand.facts_source:
+        raise HTTPException(400, "先选一个素材源")
+    try:
+        facts = await ai_jobs.pull_facts(brand)
+    except AiError as e:
+        raise HTTPException(400, str(e))
+    return {"facts": facts.text, "keys": facts.keys, "note": facts.note}
+
+
 # ── 人设档案 ─────────────────────────────────────────────────────────────────
 @app.get("/api/ai/brands")
 async def list_ai_brands(platform: str | None = None):
@@ -9906,6 +9961,12 @@ def _apply_brand_input(b: AiBrand, body: AiBrandIn) -> None:
     b.banned_words = body.banned_words.strip()
     b.cards_min, b.cards_max = lo, hi
     b.allowed_templates = json.dumps(picked, ensure_ascii=False)
+    source = (body.facts_source or "").strip()
+    if source and source not in ai_sources.available():
+        raise HTTPException(400, f"没有这个素材源: {source}")
+    b.facts_source = source
+    b.facts_config = json.dumps(body.facts_config or {}, ensure_ascii=False)
+    b.facts_dedup_drafts = max(0, min(int(body.facts_dedup_drafts or 0), 60))
     b.updated_at = datetime.utcnow()
 
 
@@ -9980,6 +10041,8 @@ async def create_ai_draft(body: AiDraftIn):
             brand_id=body.brand_id, account_id=body.account_id,
             platform=(body.platform or "xhs").strip() or "xhs",
             direction=body.direction.strip(), facts=body.facts.strip(),
+            source_keys_json=json.dumps(
+                [str(k) for k in body.source_keys if str(k)], ensure_ascii=False),
             status=ai_jobs.STATUS_PENDING,
         )
         s.add(d); s.commit(); s.refresh(d)
