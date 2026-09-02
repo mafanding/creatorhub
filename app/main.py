@@ -97,7 +97,12 @@ from .models import (ContentRecord, CommentRecord, CommentRule, CommentTask,
                       AccountActionTask, AccountStatSnapshot,
                       ShareDownloadRecord, AccountRiskState, RiskEvent, RiskAdminAudit,
                       KeywordCollectionJob, KeywordCollectionContent,
-                      KeywordCollectionComment)
+                      KeywordCollectionComment, AiBrand, AiDraft)
+from .ai import catalog as ai_catalog, jobs as ai_jobs
+from .ai.client import (PROVIDERS as AI_PROVIDERS, AiError,
+                        channel_from_settings as ai_channel_from_settings,
+                        complete_text as ai_complete_text)
+from .ai.draft import Card as AiCard, Draft as AiDraftPayload, validate_draft as ai_validate
 from .notifier import CHANNEL_TYPES, send_one
 from .profiles import (allocate_profile_dir, ensure_identity, migrate_identities,
                        assign_proxy_from_pool,
@@ -575,6 +580,11 @@ async def lifespan(app: FastAPI):
     recovered = engine.recover_interrupted_tasks()
     if recovered:
         print(f"[startup] 已恢复 {recovered} 条中断的写任务")
+    # AI 创作的任务活在协程里,进程一重启就没了,而行还停在「生成中」——
+    # 面板会一直转圈等一个不会来的结果。宁可明说中断了。
+    interrupted_drafts = ai_jobs.sweep_interrupted()
+    if interrupted_drafts:
+        print(f"[startup] 已标记 {interrupted_drafts} 条中断的 AI 创作任务")
     engine.start()
     from .engine.im_receiver import ImReceiverManager
     im_receiver = ImReceiverManager(browser)
@@ -4967,6 +4977,14 @@ class SettingsIn(BaseModel):
     ai_model: str | None = None
     ai_prompt: str | None = None
     ai_temperature: str | None = None
+    # ── AI 内容创作(写笔记 + 生成配图)──
+    # 和上面那组**故意分开**:写一篇笔记值得用贵模型,写一条评论不值得。
+    # 每一项留空都会回落到上面那组,所以只有一个网关的人不用重复填。
+    ai_content_provider: str | None = None     # openai | anthropic
+    ai_content_base_url: str | None = None
+    ai_content_api_key: str | None = None      # 留空=不改(避免误清空已存的 key)
+    ai_content_model: str | None = None
+    ai_content_max_tokens: str | None = None
 
 
 def _settings_dict() -> dict:
@@ -4980,7 +4998,22 @@ def _settings_dict() -> dict:
         "ai_temperature": get_setting("ai_temperature", "0.9"),
         # 不回传明文 key,只告知是否已配置
         "ai_api_key_set": bool(get_setting("ai_api_key", "")),
+        "ai_content_provider": get_setting("ai_content_provider", "openai"),
+        "ai_content_base_url": get_setting("ai_content_base_url", ""),
+        "ai_content_model": get_setting("ai_content_model", ""),
+        "ai_content_max_tokens": get_setting("ai_content_max_tokens", "16000"),
+        "ai_content_api_key_set": bool(get_setting("ai_content_api_key", "")),
+        # 实际会用到的那一组(把「留空回落」算完之后),让人一眼看到自己
+        # 到底在用哪个模型 —— 不然「我明明填了」和「它明明没用」会吵很久。
+        "ai_content_effective": _ai_content_effective(),
     }
+
+
+def _ai_content_effective() -> dict:
+    ch = ai_channel_from_settings()
+    return {"provider": ch.provider, "base_url": ch.base_url, "model": ch.model,
+            "api_key_set": bool(ch.api_key), "ready": ch.check() is None,
+            "why": ch.check() or ""}
 
 
 @app.get("/api/settings")
@@ -5015,6 +5048,28 @@ async def put_settings(body: SettingsIn):
         set_setting("ai_temperature", (body.ai_temperature or "0.9").strip())
     if body.ai_api_key:    # 仅在传了非空值时更新,留空=保留原 key
         set_setting("ai_api_key", body.ai_api_key.strip())
+    if body.ai_content_provider is not None:
+        p = (body.ai_content_provider or "openai").strip()
+        if p not in AI_PROVIDERS:
+            raise HTTPException(400, f"AI 通道类型无效: {p}")
+        set_setting("ai_content_provider", p)
+    if body.ai_content_base_url is not None:
+        set_setting("ai_content_base_url", body.ai_content_base_url.strip())
+    if body.ai_content_model is not None:
+        set_setting("ai_content_model", body.ai_content_model.strip())
+    if body.ai_content_max_tokens is not None:
+        raw = (body.ai_content_max_tokens or "").strip()
+        if raw:
+            try:
+                n = int(float(raw))
+            except ValueError:
+                raise HTTPException(400, "最大输出长度要填数字")
+            if not 1000 <= n <= 128000:
+                raise HTTPException(400, "最大输出长度要在 1000-128000 之间")
+            raw = str(n)
+        set_setting("ai_content_max_tokens", raw)
+    if body.ai_content_api_key:
+        set_setting("ai_content_api_key", body.ai_content_api_key.strip())
     return _settings_dict()
 
 
@@ -9672,6 +9727,437 @@ async def test_channel(cid: int):
     ok, detail = await send_one(ch_type, cfg, "CreatorHub · 测试通知",
                                 "这是一条测试消息,收到说明渠道配置正常 ✓")
     return {"ok": ok, "detail": detail}
+
+
+# ─────────── AI 创作(提示词 + API 生成正文与配图)───────────
+#
+# 一次创作 = 一行 AiDraft。它同时是**产出**和**任务状态**:
+#   pending → generating → rendering → ready | failed
+# 状态存库不存内存 —— 生成一篇要几十秒到几分钟,页面刷新和服务重启都不该
+# 让人丢掉已经花钱买到的东西。轮询就是普通地读这一行(和关键词采集一个路子)。
+
+
+class AiBrandIn(BaseModel):
+    name: str = ""
+    platform: str = "xhs"
+    mark: str = ""
+    date_label: str = ""
+    footer_note: str = ""
+    doc: str = ""
+    theme: str = ""
+    product_name: str = ""
+    product_line: str = ""
+    cta_line: str = ""
+    tags_strategy: str = ""
+    banned_words: str = ""
+    cards_min: int = 4
+    cards_max: int = 7
+    allowed_templates: list[str] = []
+
+
+class AiDraftIn(BaseModel):
+    brand_id: int | None = None
+    account_id: int | None = None
+    platform: str = "xhs"
+    direction: str = ""
+    facts: str = ""
+
+
+class AiDraftUpdate(BaseModel):
+    """人在面板上改草稿。改完可以只重渲染,不用再花一次生成的钱。"""
+    title: str | None = None
+    content: str | None = None
+    tags: list[str] | None = None
+    cards: list[dict] | None = None
+    account_id: int | None = None
+    notes: str | None = None
+
+
+class AiContentTestIn(BaseModel):
+    provider: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    model: str | None = None
+
+
+class AiToPublishIn(BaseModel):
+    account_id: int | None = None
+    scheduled_at: str | None = None
+
+
+def _ai_brand_dict(b: AiBrand) -> dict:
+    try:
+        allowed = json.loads(b.allowed_templates or "[]")
+    except json.JSONDecodeError:
+        allowed = []
+    return {
+        "id": b.id, "name": b.name, "platform": b.platform, "mark": b.mark,
+        "date_label": b.date_label, "footer_note": b.footer_note, "doc": b.doc,
+        "theme": b.theme, "product_name": b.product_name,
+        "product_line": b.product_line, "cta_line": b.cta_line,
+        "tags_strategy": b.tags_strategy, "banned_words": b.banned_words,
+        "cards_min": b.cards_min, "cards_max": b.cards_max,
+        "allowed_templates": allowed if isinstance(allowed, list) else [],
+        "created_at": b.created_at.isoformat() if b.created_at else None,
+        "updated_at": b.updated_at.isoformat() if b.updated_at else None,
+    }
+
+
+def _ai_json(raw: str, fallback):
+    try:
+        v = json.loads(raw or "")
+    except json.JSONDecodeError:
+        return fallback
+    return v if isinstance(v, type(fallback)) else fallback
+
+
+def _ai_draft_dict(d: AiDraft, *, full: bool = False) -> dict:
+    images = _ai_json(d.images_json, [])
+    out = {
+        "id": d.id, "brand_id": d.brand_id, "account_id": d.account_id,
+        "platform": d.platform, "direction": d.direction,
+        "status": d.status, "title": d.title,
+        "tags": _ai_json(d.tags_json, []),
+        "problems": _ai_json(d.problems_json, []),
+        "error": d.error, "model": d.model, "attempts": d.attempts,
+        "image_count": len(images),
+        "card_count": len(_ai_json(d.cards_json, [])),
+        "publish_task_id": d.publish_task_id,
+        "running": ai_jobs.is_running(d.id) if d.id else False,
+        "created_at": d.created_at.isoformat() if d.created_at else None,
+        "updated_at": d.updated_at.isoformat() if d.updated_at else None,
+    }
+    if full:
+        out.update({
+            "content": d.content, "facts": d.facts, "notes": d.notes,
+            "cards": _ai_json(d.cards_json, []),
+            "usage": _ai_json(d.usage_json, {}),
+            "content_length": len(d.content or ""),
+        })
+    return out
+
+
+@app.get("/api/ai/catalog")
+async def ai_catalog_list():
+    """卡片模板 + 视觉风格清单。字段说明只有一处来源:模板旁边那份 sample.json。"""
+    return {
+        "templates": [
+            {"name": t.name, "summary": t.summary,
+             "fields": [{"key": k, "desc": v} for k, v in t.schema.items()
+                        if not k.startswith("_")],
+             "sample": t.sample}
+            for t in ai_catalog.templates().values()
+        ],
+        "themes": [{"name": t.name, "label": t.label, "one_liner": t.one_liner,
+                    "good_for": t.good_for} for t in ai_catalog.themes().values()],
+        "cover_template": ai_catalog.COVER_TEMPLATE,
+        "canvas": {"width": ai_catalog.CANVAS_W, "height": ai_catalog.CANVAS_H},
+        "providers": list(AI_PROVIDERS),
+    }
+
+
+@app.post("/api/settings/ai-content-test")
+async def ai_content_test(body: AiContentTestIn):
+    """用当前(或传入的)内容通道做一次最小生成,验证连通性。"""
+    overrides = {f"ai_content_{k}": v for k, v in body.model_dump().items()
+                 if v not in (None, "")}
+    channel = ai_channel_from_settings(overrides)
+    if (why := channel.check()) is not None:
+        return {"ok": False, "error": why}
+    try:
+        text, usage = await ai_complete_text(
+            channel, "你是一个中文写作助手,只回答被问到的东西,不要解释。",
+            "用一句话(不超过 20 字)介绍一下小红书图文笔记的封面该写什么。")
+    except AiError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "sample": text[:200], "usage": usage, "model": channel.label}
+
+
+# ── 人设档案 ─────────────────────────────────────────────────────────────────
+@app.get("/api/ai/brands")
+async def list_ai_brands(platform: str | None = None):
+    with get_session() as s:
+        q = select(AiBrand)
+        if platform:
+            q = q.where(AiBrand.platform == platform)
+        rows = s.exec(q.order_by(AiBrand.id.desc())).all()
+        return [_ai_brand_dict(b) for b in rows]
+
+
+def _apply_brand_input(b: AiBrand, body: AiBrandIn) -> None:
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "人设要有名字")
+    if body.theme and body.theme not in ai_catalog.themes():
+        raise HTTPException(400, f"没有这个视觉风格: {body.theme}")
+    lo, hi = int(body.cards_min or 1), int(body.cards_max or 1)
+    if not 1 <= lo <= hi <= 18:
+        raise HTTPException(400, "卡片张数范围要满足 1 ≤ 最少 ≤ 最多 ≤ 18")
+    known = set(ai_catalog.template_names())
+    picked = [t for t in (body.allowed_templates or []) if t]
+    unknown = [t for t in picked if t not in known]
+    if unknown:
+        raise HTTPException(400, f"没有这些卡片模板: {'、'.join(unknown)}")
+    b.name, b.platform = name, (body.platform or "xhs").strip() or "xhs"
+    b.mark, b.date_label = body.mark.strip(), body.date_label.strip()
+    b.footer_note, b.doc, b.theme = body.footer_note.strip(), body.doc, body.theme.strip()
+    b.product_name, b.product_line = body.product_name.strip(), body.product_line.strip()
+    b.cta_line, b.tags_strategy = body.cta_line.strip(), body.tags_strategy.strip()
+    b.banned_words = body.banned_words.strip()
+    b.cards_min, b.cards_max = lo, hi
+    b.allowed_templates = json.dumps(picked, ensure_ascii=False)
+    b.updated_at = datetime.utcnow()
+
+
+@app.post("/api/ai/brands")
+async def create_ai_brand(body: AiBrandIn):
+    with get_session() as s:
+        b = AiBrand()
+        _apply_brand_input(b, body)
+        s.add(b); s.commit(); s.refresh(b)
+        return _ai_brand_dict(b)
+
+
+@app.put("/api/ai/brands/{bid}")
+async def update_ai_brand(bid: int, body: AiBrandIn):
+    with get_session() as s:
+        b = s.get(AiBrand, bid)
+        if not b:
+            raise HTTPException(404)
+        _apply_brand_input(b, body)
+        s.add(b); s.commit(); s.refresh(b)
+        return _ai_brand_dict(b)
+
+
+@app.delete("/api/ai/brands/{bid}")
+async def delete_ai_brand(bid: int):
+    with get_session() as s:
+        b = s.get(AiBrand, bid)
+        if b:
+            # 草稿留着,只把关联抹掉 —— 删人设不该顺手删掉已经生成好的稿子。
+            for d in s.exec(select(AiDraft).where(AiDraft.brand_id == bid)).all():
+                d.brand_id = None
+                s.add(d)
+            s.delete(b); s.commit()
+    return {"ok": True}
+
+
+# ── 草稿 ─────────────────────────────────────────────────────────────────────
+@app.get("/api/ai/drafts")
+async def list_ai_drafts(platform: str | None = None, brand_id: int | None = None,
+                         limit: int = 50):
+    with get_session() as s:
+        q = select(AiDraft)
+        if platform:
+            q = q.where(AiDraft.platform == platform)
+        if brand_id:
+            q = q.where(AiDraft.brand_id == brand_id)
+        rows = s.exec(q.order_by(AiDraft.id.desc()).limit(max(1, min(limit, 200)))).all()
+        return [_ai_draft_dict(d) for d in rows]
+
+
+@app.get("/api/ai/drafts/{did}")
+async def get_ai_draft(did: int):
+    with get_session() as s:
+        d = s.get(AiDraft, did)
+        if not d:
+            raise HTTPException(404)
+        return _ai_draft_dict(d, full=True)
+
+
+@app.post("/api/ai/drafts")
+async def create_ai_draft(body: AiDraftIn):
+    """建一行,立刻返回,生成在后台跑 —— 前端拿 id 去轮询这一行。"""
+    channel = ai_channel_from_settings()
+    if (why := channel.check()) is not None:
+        raise HTTPException(400, f"AI 内容通道还不能用:{why}(去「设置」里配)")
+    with get_session() as s:
+        if body.brand_id and not s.get(AiBrand, body.brand_id):
+            raise HTTPException(400, "人设不存在")
+        if body.account_id and not s.get(DouyinAccount, body.account_id):
+            raise HTTPException(400, "账号不存在")
+        d = AiDraft(
+            brand_id=body.brand_id, account_id=body.account_id,
+            platform=(body.platform or "xhs").strip() or "xhs",
+            direction=body.direction.strip(), facts=body.facts.strip(),
+            status=ai_jobs.STATUS_PENDING,
+        )
+        s.add(d); s.commit(); s.refresh(d)
+        payload = _ai_draft_dict(d, full=True)
+    ai_jobs.enqueue(payload["id"])
+    return payload
+
+
+@app.post("/api/ai/drafts/{did}/regenerate")
+async def regenerate_ai_draft(did: int, body: AiDraftIn | None = None):
+    """重新生成。方向和素材可以顺手改 —— 不满意通常是因为方向没说清。"""
+    channel = ai_channel_from_settings()
+    if (why := channel.check()) is not None:
+        raise HTTPException(400, f"AI 内容通道还不能用:{why}")
+    if ai_jobs.is_running(did):
+        raise HTTPException(400, "这一篇正在生成中")
+    with get_session() as s:
+        d = s.get(AiDraft, did)
+        if not d:
+            raise HTTPException(404)
+        if body is not None:
+            if body.direction.strip():
+                d.direction = body.direction.strip()
+            if body.facts.strip():
+                d.facts = body.facts.strip()
+            if body.brand_id is not None:
+                d.brand_id = body.brand_id
+        d.status = ai_jobs.STATUS_PENDING
+        d.error = ""
+        d.updated_at = datetime.utcnow()
+        s.add(d); s.commit(); s.refresh(d)
+        payload = _ai_draft_dict(d, full=True)
+    ai_jobs.enqueue(did)
+    return payload
+
+
+@app.put("/api/ai/drafts/{did}")
+async def update_ai_draft(did: int, body: AiDraftUpdate):
+    """人工修改。**改完会立刻重跑一次预检**,让人当场看到还差什么。"""
+    if ai_jobs.is_running(did):
+        raise HTTPException(400, "这一篇正在生成中,等它跑完再改")
+    with get_session() as s:
+        d = s.get(AiDraft, did)
+        if not d:
+            raise HTTPException(404)
+        if body.title is not None:
+            d.title = body.title.strip()
+        if body.content is not None:
+            d.content = body.content
+        if body.tags is not None:
+            d.tags_json = json.dumps(
+                [str(t).strip().lstrip("#") for t in body.tags if str(t).strip()],
+                ensure_ascii=False)
+        if body.cards is not None:
+            cards = [AiCard.from_dict(c) for c in body.cards if isinstance(c, dict)]
+            known = set(ai_catalog.template_names())
+            bad = [c.template for c in cards if c.template not in known]
+            if bad:
+                raise HTTPException(400, f"没有这些卡片模板: {'、'.join(bad)}")
+            d.cards_json = json.dumps([c.to_dict() for c in cards], ensure_ascii=False)
+        if body.notes is not None:
+            d.notes = body.notes
+        if body.account_id is not None:
+            if body.account_id and not s.get(DouyinAccount, body.account_id):
+                raise HTTPException(400, "账号不存在")
+            d.account_id = body.account_id or None
+        d.problems_json = json.dumps(_ai_recheck(d), ensure_ascii=False)
+        d.updated_at = datetime.utcnow()
+        s.add(d); s.commit(); s.refresh(d)
+        return _ai_draft_dict(d, full=True)
+
+
+def _ai_recheck(d: AiDraft) -> list[str]:
+    """按库里现在的内容重跑预检。图还是上一次渲的那批 —— 改了卡片数据但没重渲时,
+    张数对不上会被这一条抓出来,这正是我们想让人看见的。"""
+    draft = AiDraftPayload(
+        title=d.title, content=d.content,
+        tags=_ai_json(d.tags_json, []),
+        cards=[AiCard.from_dict(c) for c in _ai_json(d.cards_json, [])],
+        notes=d.notes,
+    )
+    images = [Path(p) for p in _ai_json(d.images_json, [])]
+    return ai_validate(draft, images or None,
+                       known_templates=set(ai_catalog.template_names()))
+
+
+@app.post("/api/ai/drafts/{did}/render")
+async def render_ai_draft(did: int):
+    """按现在的卡片数据重渲一遍图。"""
+    if ai_jobs.is_running(did):
+        raise HTTPException(400, "这一篇正在生成中")
+    try:
+        problems = await ai_jobs.rerender(did)
+    except AiError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"渲染失败: {e}")
+    with get_session() as s:
+        d = s.get(AiDraft, did)
+        if not d:
+            raise HTTPException(404)
+        return {**_ai_draft_dict(d, full=True), "problems": problems}
+
+
+@app.get("/api/ai/drafts/{did}/images/{index}")
+async def ai_draft_image(did: int, index: int):
+    """预览第 index 张(从 0 起)。路径必须落在这篇草稿自己的目录里 ——
+    images_json 是我们自己写的,但一个被改过的库不该能读到任意文件。"""
+    with get_session() as s:
+        d = s.get(AiDraft, did)
+        if not d:
+            raise HTTPException(404)
+        images = _ai_json(d.images_json, [])
+    if not 0 <= index < len(images):
+        raise HTTPException(404)
+    path = Path(images[index]).resolve()
+    root = ai_jobs.draft_dir(did).resolve()
+    if not path.is_file() or root not in path.parents:
+        raise HTTPException(404)
+    return FileResponse(path, media_type="image/png",
+                        headers={"Cache-Control": "no-cache"})
+
+
+@app.delete("/api/ai/drafts/{did}")
+async def delete_ai_draft(did: int, with_files: bool = True):
+    if ai_jobs.is_running(did):
+        raise HTTPException(400, "这一篇正在生成中")
+    with get_session() as s:
+        d = s.get(AiDraft, did)
+        if d:
+            s.delete(d); s.commit()
+    if with_files:
+        shutil.rmtree(ai_jobs.draft_dir(did), ignore_errors=True)
+    return {"ok": True}
+
+
+@app.post("/api/ai/drafts/{did}/to-publish")
+async def ai_draft_to_publish(did: int, body: AiToPublishIn):
+    """转成发布任务。**预检不过的一律不放行** —— 这是最后一道闸,
+    过了这里就进发布队列,到点自己发出去,没人再看一眼。"""
+    with get_session() as s:
+        d = s.get(AiDraft, did)
+        if not d:
+            raise HTTPException(404)
+        if d.status != ai_jobs.STATUS_READY:
+            raise HTTPException(400, f"这一篇状态是 {d.status},还不能发")
+        # 先看图在不在。图被清掉时预检也会报一串「图片不存在」,但那串话
+        # 读起来像是内容写错了 —— 而实际该做的只是点一下「重新渲染」。
+        images = [p for p in _ai_json(d.images_json, []) if Path(p).exists()]
+        if not images:
+            raise HTTPException(400, "没有可用的配图,先点「重新渲染」")
+        problems = _ai_recheck(d)
+        if problems:
+            raise HTTPException(400, "预检没过,先改掉这些:" + "；".join(problems[:5]))
+
+        account_id = body.account_id or d.account_id
+        acc = s.get(DouyinAccount, account_id) if account_id else None
+        if not acc or acc.platform not in ("xhs", "kuaishou", "douyin", "shipinhao"):
+            raise HTTPException(400, "请选择一个已登录的抖音 / 小红书 / 快手 / 视频号账号")
+        if acc.platform in ("kuaishou", "douyin", "shipinhao"):
+            if not (acc.creator_storage_state or acc.storage_state):
+                raise HTTPException(400, "该账号不可发布:请先在账号页完成登录")
+        elif not (acc.creator_storage_state or has_creator_cookies(acc.storage_state)):
+            raise HTTPException(400, "该账号不可发布:请对该号完成「小红书扫码登录」或「创作者登录」")
+
+        t = PublishTask(
+            platform=acc.platform, account_id=acc.id, media_type="images",
+            title=d.title.strip()[:20], desc=d.content,
+            # 话题逗号分隔、不带 #(发布层会自己加)
+            topics=",".join(_ai_json(d.tags_json, [])),
+            media_json=json.dumps(images), scheduled_at=_parse_when(body.scheduled_at),
+        )
+        s.add(t); s.commit(); s.refresh(t)
+        d.publish_task_id = t.id
+        d.account_id = acc.id
+        d.updated_at = datetime.utcnow()
+        s.add(d); s.commit()
+        return {"draft_id": did, "publish": _publish_dict(t)}
 
 
 # ─────────── 前端 ───────────

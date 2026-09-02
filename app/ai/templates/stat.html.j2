@@ -1,0 +1,128 @@
+{% extends "_layout.html.j2" %}
+{# 大数字卡：一个数字撑满全场。
+   用来做钩子（「12 张卡 · 37 个在跑的活动」）或做结果展示（「这个月省了 ¥1,240」）。
+   深色底 + 巨大浅色数字 + 红色前后缀，缩到手机 1/3 大小也能一眼读到重点。
+   构图居中：主数字可能只有两位数，左对齐会在右边留一大片死白。 #}
+
+{% block canvas_class %}dark{% endblock %}
+
+{% block style %}
+/* 整块内容自己垂直居中：可选字段全不给时（只有 lead + value），
+   靠居中把留白平摊到上下两端，不会出现「内容堆在顶上、底下一大片空」 */
+.st-wrap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; justify-content: center; }
+
+.st-head   { flex: 0 0 auto; text-align: center; }
+/* 眉标字间距跟 _base.css 的 .kicker 走，模板不再自己 override */
+.st-lead   { margin: 22px auto 0; max-width: 840px; text-wrap: balance; }
+.st-lead em { font-style: normal; color: var(--accent); }
+
+/* 上下两团留白，下面略多，让数字坐在视觉中心偏上。
+   封顶 170px：字段给得少时留白不会无限膨胀成死白 */
+.st-air     { flex: 1 1 0; min-height: 0; max-height: 170px; }
+.st-air-top { flex-grow: 0.9; }
+.st-air-bot { flex-grow: 1.1; }
+
+/* 数字带：上下两条虚线把留白框成「凭条」结构，而不是散着的死白 */
+.st-figure {
+  flex: 0 0 auto;
+  text-align: center;
+  padding: 74px 0 58px;
+  /* 深色底上 --rule 几乎看不见，虚线改用 --muted 才撑得起「凭条」结构 */
+  border-top: 2px dotted var(--muted);
+  border-bottom: 2px dotted var(--muted);
+}
+
+/* 全卡唯一写死的字号 —— 这张卡的全部意义就是这个数字。
+   250px 起跳，data-fit 按需往下缩；word-break 让「太宽」先变成「换行」，
+   换行才会被 _layout 的 fit 脚本（只看 scrollHeight）看见。
+   所以这里绝不能加 nowrap / inline-flex / clamp-N。 */
+.st-value {
+  display: block;
+  font-size: 250px;
+  line-height: 1.06;
+  letter-spacing: -0.035em;
+  word-break: break-all;
+  color: var(--ink);
+}
+.st-affix { font-size: 0.32em; letter-spacing: 0; color: var(--accent); }
+.st-pre   { margin-right: 0.05em; }
+.st-suf   { margin-left: 0.07em; }
+
+.st-caption { margin: 32px auto 0; max-width: 780px; text-wrap: balance; }
+
+.st-note { flex: 0 0 auto; margin-top: 30px; text-align: center; }
+/* .chip 自带 nowrap，note 写长了会横向撑出画布 —— 这里放开换行并封宽 */
+.st-note .chip { max-width: 860px; white-space: normal; text-align: center; }
+/* 补充信息一律走中性 .chip + <em> 标红。深色卡上红色是唯一的强调色，
+   绿/黄留给浅色卡分担语义，这张卡上再加一种颜色只会分散那个大数字的注意力。 */
+.st-note em {
+  font-style: normal;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.st-stats {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  padding-top: 34px;
+  border-top: 2px solid var(--ink);
+}
+.st-cell { flex: 1 1 0; min-width: 0; padding: 0 18px; text-align: center; }
+.st-cell + .st-cell { border-left: 1px solid var(--rule); }
+/* break-all：次级数字写超了宁可换行也不横向溢出（等宽数字本身不会断行） */
+.st-cell-v { font-size: calc(var(--t-h1) * 0.92); line-height: 1.1; letter-spacing: -0.02em; word-break: break-all; }
+.st-cell-u { font-size: var(--t-micro); margin-left: 7px; color: var(--muted); font-weight: 500; letter-spacing: 0.02em; }
+.st-cell-l { margin-top: 12px; }
+{% endblock %}
+
+{% block body %}
+{# StrictUndefined：字典缺 key 时 {% if d.x %} 会直接抛错，所有可选字段先落成本地变量 #}
+{% set kicker  = d.kicker  | default('', true) %}
+{% set lead    = d.lead    | default('', true) %}
+{% set prefix  = d.prefix  | default('', true) %}
+{% set value   = d.value   | default('', true) %}
+{% set suffix  = d.suffix  | default('', true) %}
+{% set caption = d.caption | default('', true) %}
+{% set note    = d.note    | default('', true) %}
+{% set stats   = d.stats   | default([], true) %}
+
+<div class="st-wrap">
+<div class="st-head">
+  {% if kicker %}<div class="kicker">{{ kicker }}</div>{% endif %}
+  {% if lead %}
+  <h1 class="h2 st-lead" data-fit data-fit-h="132" data-fit-min="0.62">{{ lead | rich }}</h1>
+  {% endif %}
+</div>
+
+<div class="st-air st-air-top"></div>
+
+<div class="st-figure">
+  <div class="st-value num" data-fit data-fit-h="272" data-fit-min="0.42">{% if prefix %}<span class="st-affix st-pre">{{ prefix }}</span>{% endif %}{{ value }}{% if suffix %}<span class="st-affix st-suf">{{ suffix }}</span>{% endif %}</div>
+  {% if caption %}
+  <p class="sub st-caption clamp-2">{{ caption }}</p>
+  {% endif %}
+</div>
+
+{% if note %}
+<div class="st-note"><span class="chip">{{ note | rich }}</span></div>
+{% endif %}
+
+<div class="st-air st-air-bot"></div>
+
+{% if stats %}
+<div class="st-stats">
+  {% for s in stats[:3] %}
+  <div class="st-cell">
+    <div class="st-cell-v num">{{ s.value | default('', true) }}{% if s.unit | default('', true) %}<span class="st-cell-u">{{ s.unit }}</span>{% endif %}</div>
+    {% if s.label | default('', true) %}
+    <div class="small st-cell-l clamp-1">{{ s.label }}</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+</div>
+{% endblock %}

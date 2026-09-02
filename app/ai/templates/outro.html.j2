@@ -1,0 +1,150 @@
+{% extends "_layout.html.j2" %}
+{#
+  结尾引导卡：每篇的最后一张。
+  一句共鸣的总结（主角）→ 弱一档的产品便签 → 一行「主页简介里有」→ 一句提问。
+  刻意不做成投放素材：产品块用 .card 收在中间偏下，字号比总结句小两档，
+  没有按钮、没有网址、没有「立即/马上/点击」。
+
+  高度预算（正文可用 ≈ 1094px，所有块 flex:0 0 auto，不许被压扁）：
+    眉标 41 + 总结 26+210 + 补充 24+96 + 引子 33+18
+    + 产品便签 ≈ 397 + 引导行 20+33 + 提问 28+26+2+103+4  ≈ 1058
+  最长文案下仍有 ~36px 余量；余量由两个 .spacer 平分，不会攒成一块死白。
+  总结句用 .hero + data-fit：短句撑到 102px，长句自动缩到装得下为止；
+  可选内容缺席时（没有 features / 补充句…）省下的高度会还给它，见 sum_h。
+#}
+
+{% block style %}
+/* 顶部小标题 + 一条延伸出去的细线，像便签的撕口 */
+.ot-eyebrow { flex: 0 0 auto; display: flex; align-items: center; gap: 20px; }
+.ot-eyebrow .ot-hair { height: 1px; background: var(--rule); }
+
+/* 主角：总结 / 共鸣句。data-fit 先缩字号，max-height（模板内联算出来）是硬闸 */
+.ot-sum {
+  flex: 0 0 auto;
+  margin-top: 26px;
+  max-height: 210px;
+  overflow: hidden;
+}
+.ot-sum em { font-style: normal; color: var(--accent); }
+
+.ot-note { flex: 0 0 auto; margin-top: 24px; line-height: 1.5; max-width: 840px; }
+
+/* 「顺便一提」：把产品块降一级，也顶住中间那段空 */
+.ot-lead { flex: 0 0 auto; display: flex; align-items: center; gap: 20px; margin-bottom: 18px; }
+.ot-lead .ot-dash { border-top: 2px dotted var(--rule); }
+
+/* 产品便签：明显弱于上面的总结句，靠白底 + 左侧一道红边收住 */
+.ot-card {
+  flex: 0 0 auto;
+  padding: 26px 32px 28px;
+  border-left: var(--bar) solid var(--accent);
+}
+.ot-pline { margin-top: 10px; line-height: 1.45; color: var(--ink-2); }
+
+.ot-feats { list-style: none; margin-top: 20px; border-top: 1px solid var(--hairline); }
+.ot-feat {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  padding: 10px 0;
+  font-size: var(--t-small);
+  line-height: 1.45;
+  color: var(--ink-2);
+}
+.ot-feat + .ot-feat { border-top: 1px solid var(--hairline); }
+/* 记号用灰的：整块只留左边一道红，别让「弱一档」的产品块比总结句还花 */
+.ot-tick {
+  flex: 0 0 auto;
+  width: 18px; height: 2px;
+  background: var(--rule);
+  transform: translateY(-8px);
+}
+
+/* 引导行：压到最小一行，别长得像 CTA */
+.ot-cta { flex: 0 0 auto; display: flex; align-items: baseline; gap: 12px; margin-top: 20px; }
+.ot-cta .ot-up { font-family: var(--mono); color: var(--accent); letter-spacing: 0; }
+
+/* 提问：留给评论区 */
+.ot-ask {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 22px;
+  margin-top: 28px;
+  padding-top: 26px;
+  border-top: 2px solid var(--ink);
+}
+.ot-ask .ot-q { flex: 0 0 auto; font-size: var(--t-h2); line-height: 1.1; color: var(--accent); }
+.ot-ask .ot-qt { padding-top: 4px; }
+{% endblock %}
+
+{% block body %}
+{% set pname = d.product_name | default(brand.get('product', {}).get('name_zh', '') or brand.get('mark', ''), true) %}
+{% set feats = (d.get('features') or [])[:3] %}
+{#
+  总结句能占多高：底价 210px，下面每少一块可选内容就把腾出来的高度还给它
+  （估的都比实际省下的略小，宁可留白也不撑破），最多 360px ≈ hero 三行。
+#}
+{% set sum_h = [210
+     + (0 if d.get('summary_note') else 115)
+     + (0 if d.get('product_line') else 85)
+     + (0 if d.get('cta_line') else 50)
+     + (190 if not feats else (3 - feats | length) * 55), 360] | min %}
+
+<div class="ot-eyebrow">
+  <span class="kicker">{{ d.kicker | default('写在最后', true) }}</span>
+  <span class="ot-hair grow"></span>
+</div>
+
+<h2 class="hero ot-sum" style="max-height:{{ sum_h }}px"
+    data-fit data-fit-h="{{ sum_h }}" data-fit-min="0.42">{{ d.get('summary', '') | rich }}</h2>
+
+{% if d.get('summary_note') %}
+<p class="sub ot-note clamp-2">{{ d.summary_note }}</p>
+{% endif %}
+
+<div class="spacer"></div>
+
+<div class="ot-lead">
+  <span class="micro">{{ d.product_lead | default('顺便一提', true) }}</span>
+  <span class="ot-dash grow"></span>
+</div>
+
+<section class="card ot-card">
+  <div class="row between gap-16">
+    <span class="h3 clamp-1 grow">{{ pname }}</span>
+    {% if d.get('product_tag') %}<span class="chip">{{ d.product_tag }}</span>{% endif %}
+  </div>
+
+  {% if d.get('product_line') %}
+  <p class="small ot-pline clamp-2">{{ d.product_line }}</p>
+  {% endif %}
+
+  {% if feats %}
+  <ul class="ot-feats">
+    {% for f in feats %}
+    <li class="ot-feat">
+      <span class="ot-tick"></span>
+      <span class="clamp-1 grow">{{ f }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+
+{% if d.get('cta_line') %}
+<div class="micro ot-cta">
+  <span class="ot-up">↑</span>
+  <span class="clamp-1">{{ d.cta_line }}</span>
+</div>
+{% endif %}
+
+<div class="spacer"></div>
+
+{% if d.get('question') %}
+<div class="ot-ask">
+  <span class="num ot-q">?</span>
+  <p class="h3 ot-qt clamp-2 grow">{{ d.question }}</p>
+</div>
+{% endif %}
+{% endblock %}

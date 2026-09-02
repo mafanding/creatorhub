@@ -1,0 +1,41 @@
+/* 制表 —— 冷灰蓝 + 发丝线 + 大量留白。
+ *
+ * 取向：参数对比、评测、数据结论。这一路的说服力来自「看起来像报表而不是广告」：
+ * 一根 1px 的线、全等宽的数字、克制到近乎无聊的配色。
+ * 读者要的是能截图存下来对着抄的东西。
+ */
+:root {
+  --paper: #F5F7F9; --paper-2: #FFFFFF;
+  --ink: #131C26; --ink-2: #38475A; --muted: #6E7E8E;
+  --rule: #CBD5DF; --hairline: #E3E9EF;
+
+  --accent: #0B5FCC;  --accent-bg: #E6EFFB;
+  --gain: #0E7A57;    --gain-bg: #E3F1EC;
+  --warn: #9A6300;    --warn-bg: #F7EEDD;
+
+  --ink-dark: #131C26; --paper-dark: #EDF1F5; --on-accent: #FFFFFF;
+
+  --sans: "Hiragino Sans GB", "PingFang SC", "Avenir Next", -apple-system, sans-serif;
+  --mono: "SF Mono", ui-monospace, Menlo, "Yuanti SC", monospace;
+}
+
+/* 发丝线：报表的线越细越可信 */
+hr, .rule, .sep { border: 0; border-top: 1px solid var(--rule); }
+.card, .box, .item, .row { border-radius: 2px; }
+
+/* 所有数字等宽对齐 —— 竖着扫的时候位数要对得上 */
+.num, .stat, .amount, td, .val { font-variant-numeric: tabular-nums; font-family: var(--mono); }
+
+/* 标签不用胶囊，用方角小签 */
+.tag, .chip { border-radius: 2px !important; letter-spacing: 0.06em; }
+
+/* 制表的深色卡：石板灰蓝，克制到底。强调色只提亮一档。 */
+:root {
+  --d-bg: #101820; --d-bg-2: #18232E;
+  --d-ink: #EDF1F5; --d-ink-2: #B7C3CF; --d-muted: #7C8B99;
+  --d-rule: #253442; --d-hairline: #1B2731;
+  --d-accent: #5AA9FF; --d-accent-bg: #12243A;
+  --d-gain: #4FC79B; --d-gain-bg: #0F2620;
+  --d-warn: #E0AE4E; --d-warn-bg: #2A2110;
+  --d-on-accent: #101820;
+}

@@ -1,0 +1,53 @@
+/* 手记 —— 横格纸 + 手写 + 蓝黑墨水。
+ *
+ * 取向：第一人称经验帖。手写体让「这是我自己踩过的坑」可信度陡增，
+ * 而横格纸背景把整张卡从「设计稿」变成「随手记的一页」。
+ * 强调不用色块，用马克笔高亮 —— 那是人翻自己笔记时真会做的动作。
+ */
+:root {
+  --paper: #FCFBF5; --paper-2: #FFFFFF;
+  --ink: #1B2A4A; --ink-2: #3A4A66; --muted: #7C8699;   /* 蓝黑墨水，不是纯黑 */
+  --rule: #C3CEDD; --hairline: #DDE4EE;
+
+  --accent: #C4392E;  --accent-bg: #FBE8E4;   /* 红笔批注 */
+  --gain: #2E6B4A;    --gain-bg: #E6EFE7;
+  --warn: #B07A12;    --warn-bg: #F8EFD9;
+
+  --ink-dark: #1B2A4A; --paper-dark: #F3F1E8; --on-accent: #FFFFFF;
+
+  --sans: "HanziPen SC", "Hannotate SC", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  --mono: "Yuanti SC", "SF Mono", Menlo, "PingFang SC", monospace;
+}
+
+/* 横格纸。压在最底层，别盖住内容 */
+body {
+  background-image: repeating-linear-gradient(
+    to bottom, transparent 0 63px, var(--rule) 63px 64px);
+  background-position: 0 96px;
+}
+
+/* 手写不该有锐利的直角，但也不能圆成气泡 */
+.card, .box, .item { border-radius: 4px; }
+
+/* 马克笔高亮：一道压在字底下的黄，故意上下不对齐。
+   只能挂 .mark-hl —— .mark 是页眉的品牌标记，套上去会给标题糊一块黄。 */
+.mark-hl {
+  background: linear-gradient(to bottom, transparent 42%, #FFE98A 42%, #FFE98A 88%, transparent 88%);
+  padding: 0 2px;
+}
+
+/* 标题微微歪一点 —— 手写本来就不平 */
+.hero, .h1 { transform: rotate(-0.5deg); transform-origin: left center; }
+
+/* 手记的深色卡 = 钢笔墨水蓝，不是黑。横格线也跟着换成浅的。 */
+:root {
+  --d-bg: #16233D; --d-bg-2: #1F3050;
+  --d-ink: #F3F1E6; --d-ink-2: #CBD3E2; --d-muted: #A6B2C6;   /* 深色卡上的小字要再提一档，不然一排标签糊成一片 */
+  --d-rule: #2E3F5E; --d-hairline: #223252;
+  --d-accent: #FF8A7A; --d-accent-bg: #2C1D22;
+  --d-gain: #7CC6A0; --d-gain-bg: #16281F;
+  --d-warn: #E8BE5C; --d-warn-bg: #2A2312;
+  --d-on-accent: #16233D;
+}
+/* 深色卡**不画横格线**。在封面上还行，但 stat 卡的大数字会被线横穿，
+   看着像渲染故障而不是设计。墨水蓝的底本身已经够"钢笔写在纸上"了。 */

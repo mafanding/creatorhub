@@ -1,0 +1,157 @@
+{% extends "_layout.html.j2" %}
+{#
+  干货卡：编号知识点 / 避坑清单。标题 + 3-4 条编号要点 + 可选一行小结。
+
+  高度预算（正文区可用 ≈ 1093px，最坏情况每块都取满）：
+    tip-top 41 + 标题 12+92 + 副标题 14+96 + 列表留白 26+2
+    + 小结 20+32+90 = 425      →  留给列表 ≈ 668
+    列表最坏 = 4 ×(14+49+8+79+14) + 3 条分隔线 ≈ 658   →  尚余 ~10px
+  所以：标题只给一行（data-fit 会自动缩），条目标题 clamp-1、说明 clamp-2。
+  只有 .tip-list 允许被压缩（flex 可收缩 + overflow hidden 兜底），
+  其余块一律 flex:0 0 auto，保证标题和小结永远不会被挤变形。
+
+  注意：d 是 dict，StrictUndefined 下直接 if 一个不存在的键会报错，
+  所有可选字段必须先 `| default(..., true)` 取出来再判断；
+  数组也不能叫 items —— d.items 会取到 dict 自带的方法而不是数据。
+#}
+
+{% block style %}
+.tip-top {
+  flex: 0 0 auto;
+  min-height: 41px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 24px;
+}
+/* 眉标字间距跟 _base.css 的 .kicker 走，模板不再自己 override */
+.tip-count { margin-left: auto; white-space: nowrap; letter-spacing: 0.16em; }
+
+.tip-title {
+  flex: 0 0 auto;
+  margin-top: 12px;
+  max-height: 92px;
+  overflow: hidden;
+}
+.tip-title em { font-style: normal; color: var(--accent); }
+
+.tip-sub {
+  flex: 0 0 auto;
+  margin-top: 14px;
+  max-width: 880px;
+  line-height: 1.5;
+}
+.tip-sub em { font-style: normal; color: var(--ink); font-weight: 600; }
+
+/* 列表是唯一可伸缩的块：条目少时撑满（不留死白），条目多时兜底裁切 */
+.tip-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  margin-top: 30px;
+  border-top: 2px solid var(--ink);
+  display: flex;
+  flex-direction: column;
+}
+/* 条目撑满剩余高度（条数少时留白平摊在分隔线上，不会堆成一块死白），
+   但内部 .tip-row 只占内容高度并整体居中，序号才能和小标题顶对齐 */
+.tip-item {
+  flex: 1 0 auto;
+  display: flex;
+  align-items: center;
+  padding: 14px 0;
+}
+.tip-item + .tip-item { border-top: 1px solid var(--hairline); }
+.tip-row {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 26px;
+}
+
+.tip-n {
+  flex: 0 0 92px;
+  margin-top: 3px;
+  font-size: 54px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--accent);
+}
+
+.tip-main { flex: 1 1 auto; min-width: 0; }
+.tip-head { display: flex; align-items: center; gap: 14px; }
+.tip-t {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: var(--t-h3);
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+.tip-t em { font-style: normal; color: var(--accent); }
+.tip-tag { flex: 0 0 auto; padding: 4px 14px; }
+.tip-d {
+  margin-top: 8px;
+  font-size: var(--t-small);
+  line-height: 1.45;
+  color: var(--ink-2);
+}
+.tip-d em { font-style: normal; color: var(--accent); font-weight: 600; }
+
+/* 形状、内边距、标签样式全部来自 _base.css 的 .callout（detail 的踩坑提醒、
+   compare 的结论用的是同一个类），这里只补一条 margin 和正文字重。
+   纵向内边距 14px 与改造前一致，所以顶部那份高度预算不用重算。 */
+.tip-take { flex: 0 0 auto; margin-top: 20px; }
+.tip-take-t { font-weight: 600; line-height: 1.4; color: var(--ink); }
+{% endblock %}
+
+{% block body %}
+{% set tips = d.tips | default([], true) %}
+{% set shown = tips[:4] %}
+{% set kicker = d.kicker | default('', true) %}
+{% set subtitle = d.subtitle | default('', true) %}
+{% set takeaway = d.takeaway | default('', true) %}
+
+<div class="tip-top">
+  {% if kicker %}<span class="kicker">{{ kicker }}</span>{% endif %}
+  {% if shown %}
+  <span class="micro num tip-count">共 {{ shown | length }} 条</span>
+  {% endif %}
+</div>
+
+{# 标题只给一行的高度。data-fit 只量高度不量宽度，所以 min 必须低到
+   「缩到这个字号时能重新排回一行」，否则会卡在下限、第二行被 overflow 切掉。
+   0.45 → 下限 30.6px，约 30 字仍能排一行。10-16 字时根本不会触发缩放。 #}
+<h1 class="h1 tip-title" data-fit data-fit-h="92" data-fit-min="0.45">{{ d.title | default('', true) | rich }}</h1>
+
+{% if subtitle %}
+<p class="sub tip-sub clamp-2">{{ subtitle | rich }}</p>
+{% endif %}
+
+<div class="tip-list">
+  {% for t in shown %}
+  <div class="tip-item">
+    <div class="tip-row">
+      <span class="num tip-n">{{ "%02d" | format(loop.index) }}</span>
+      <div class="tip-main">
+        <div class="tip-head">
+          <span class="tip-t clamp-1">{{ t.title | default('', true) | rich }}</span>
+          {% set tag = t.tag | default('', true) %}
+          {% if tag %}<span class="chip tip-tag">{{ tag }}</span>{% endif %}
+        </div>
+        {% set desc = t.desc | default('', true) %}
+        {% if desc %}<p class="tip-d clamp-2">{{ desc | rich }}</p>{% endif %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+{% if takeaway %}
+<div class="callout tip-take">
+  <span class="callout-k">{{ d.takeaway_label | default('小结', true) }}</span>
+  <span class="callout-t tip-take-t clamp-2">{{ takeaway | rich }}</span>
+</div>
+{% endif %}
+{% endblock %}

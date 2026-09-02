@@ -1,0 +1,235 @@
+{% extends "_layout.html.j2" %}
+{# 活动清单卡：一屏 3-5 条信用卡活动。左边索引、中间活动信息、右边回报数字。 #}
+
+{# d['items'] 不能写成 d.items —— 那会取到 dict 自带的 .items 方法 #}
+{% set items      = (d['items'] | default([], true))[:5] %}
+{% set n          = items | length %}
+{# 条数越多，行内字号越小。这里给的是每条的「最小自然高度」，
+   剩余空间由 .list-item 的 flex-grow 吃掉，所以 3 条也不会留大片白。
+   预算：正文区 1094px − 页头块(最坏 267) − 分隔(22) − 提示条(87) ≈ 718px，
+   5 条 ×141.1 = 705.7，最坏情况仍留约 20px 余量。
+   numh = 回报数字单行高度，喂给 data-fit，长数字会自动缩到一行。 #}
+{% set SIZES = {
+     1: {'name': 52, 'sub': 30, 'num': 78, 'numh': 86, 'cap': 24, 'chip': 24, 'chipPad': '6px 17px', 'chipMb': 8,  'pad': 24, 'g1': 8, 'g2': 10},
+     2: {'name': 52, 'sub': 30, 'num': 78, 'numh': 86, 'cap': 24, 'chip': 24, 'chipPad': '6px 17px', 'chipMb': 8,  'pad': 24, 'g1': 8, 'g2': 10},
+     3: {'name': 52, 'sub': 30, 'num': 78, 'numh': 86, 'cap': 24, 'chip': 24, 'chipPad': '6px 17px', 'chipMb': 8,  'pad': 24, 'g1': 8, 'g2': 10},
+     4: {'name': 44, 'sub': 27, 'num': 64, 'numh': 71, 'cap': 22, 'chip': 22, 'chipPad': '5px 15px', 'chipMb': 6,  'pad': 16, 'g1': 6, 'g2': 8},
+     5: {'name': 36, 'sub': 24, 'num': 50, 'numh': 56, 'cap': 20, 'chip': 20, 'chipPad': '4px 13px', 'chipMb': 5,  'pad': 9,  'g1': 4, 'g2': 5}
+   } %}
+{% set s = SIZES.get(n, SIZES[5]) %}
+
+{% set kicker   = d.kicker   | default('', true) %}
+{% set title    = d.title    | default('', true) %}
+{% set subtitle = d.subtitle | default('', true) %}
+{% set stat     = d.stat     | default('', true) %}
+{% set note     = d.note     | default('', true) %}
+
+{% block style %}
+/* .fit-scope 是定高的 flex 列：页头/提示条一律 flex:0 0 auto，
+   否则它们会被 flex-shrink 压扁并切掉字。所有溢出压力都留给 .list-items。 */
+.list-kick, .list-title, .list-sub, .list-note { flex: 0 0 auto; }
+
+.list-kick { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+/* 字间距跟 _base.css 的 .kicker 走，模板不再自己 override */
+.list-kick .kicker { min-width: 0; }
+.list-stat { flex: 0 0 auto; }
+
+/* 标题强制一行：max-height 与 data-fit-h 保持一致，长标题自动缩字号而不换行，
+   页头高度因此是确定值，下面的清单预算才算得准。
+   padding-bottom 是给字形墨迹留的余量：.h1 行高 1.24 比字体自然行盒窄，
+   「，（）」和 g/y/p 这类下伸笔画会探出行盒，没有这 6px 就会被 overflow 切掉。 */
+.list-title { margin-top: 14px; padding-bottom: 6px; max-height: 98px; overflow: hidden; }
+.list-title em { font-style: normal; color: var(--accent); }
+.list-sub { margin-top: 10px; max-width: 880px; }
+
+/* ── 清单本体 ─────────────────────────────────────────────────────────── */
+.list-items {
+  margin-top: 22px;
+  border-top: 2px solid var(--ink);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;            /* 最后一道兜底：宁可裁掉一行，也不叠到提示条上 */
+}
+
+.list-item {
+  flex: 1 0 auto;              /* 只涨不缩：有余量就撑开，3 条也不会留大片白 */
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: var(--li-pad) 0;
+  min-width: 0;
+}
+.list-item + .list-item { border-top: 1px solid var(--hairline); }
+
+.list-no {
+  flex: 0 0 52px;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--rule);
+  letter-spacing: 0.06em;
+}
+
+.list-main { flex: 1 1 auto; min-width: 0; }
+
+.list-bank {
+  font-size: var(--li-sub);
+  font-weight: 600;
+  color: var(--muted);
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+}
+
+.list-name {
+  margin-top: var(--li-g1);
+  font-size: var(--li-name);
+  font-weight: 700;
+  line-height: 1.26;
+  letter-spacing: -0.01em;
+}
+.list-name em { font-style: normal; color: var(--accent); }
+
+.list-meta {
+  margin-top: var(--li-g2);
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  font-size: var(--li-sub);
+  color: var(--ink-2);
+  line-height: 1.4;
+  min-width: 0;
+}
+.list-meta .list-thr { min-width: 0; }
+.list-meta .list-dl {
+  flex: 0 0 auto;
+  padding-left: 16px;
+  border-left: 1px solid var(--rule);
+  white-space: nowrap;
+}
+.list-tag { color: var(--muted); margin-right: 6px; }
+
+/* 右栏：状态 / 回报说明 / 回报数字。整条最粗的信息层级都在这。 */
+/* 不要在这里加 overflow:hidden —— 数字用了 1.06 的紧行高，字形墨迹会略微出框，
+   裁掉的正好是「¥1,240,000」逗号的下伸部分。横向由子元素的 max-width 兜住。 */
+.list-pay {
+  flex: 0 0 246px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  text-align: right;
+}
+.list-pay .chip {
+  font-size: var(--li-chip);
+  padding: var(--li-chip-pad);
+  margin-bottom: var(--li-chip-mb);
+  max-width: 246px;
+  overflow: hidden;
+}
+.list-cap {
+  font-size: var(--li-cap);
+  color: var(--muted);
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+}
+.list-num {
+  margin-top: 2px;
+  font-size: var(--li-num);
+  line-height: 1.06;
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;     /* ¥1,240,000 这种不可断的长串也要能换行，data-fit 才会缩 */
+  max-width: 246px;
+}
+
+/* ── 底部提示条 ───────────────────────────────────────────────────────── */
+.list-note {
+  margin-top: 16px;
+  padding-top: 15px;
+  border-top: 2px dotted var(--rule);
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  min-width: 0;
+}
+/* 标签用 .callout-k 的长相（不带底色的红色小标签），和 tips 的「小结」、
+   detail 的「踩坑提醒」、compare 的「结论」是同一种东西。
+   原来这里是个填色小方块 —— 全站只有它一个这么写，看着像别人做的。
+   去掉底色后这一行还矮了 1px，预算只松不紧。 */
+{% endblock %}
+
+{% block body %}
+{% if kicker or stat %}
+<div class="list-kick">
+  <span class="kicker clamp-1">{{ kicker }}</span>
+  {% if stat %}<span class="chip on-accent list-stat">{{ stat }}</span>{% endif %}
+</div>
+{% endif %}
+
+{% if title %}
+<h1 class="h1 list-title" data-fit data-fit-h="98" data-fit-min="0.55">{{ title | rich }}</h1>
+{% endif %}
+
+{% if subtitle %}
+<p class="sub list-sub clamp-2">{{ subtitle }}</p>
+{% endif %}
+
+{% if n %}
+<div class="list-items grow"
+     style="--li-name:{{ s['name'] }}px; --li-sub:{{ s['sub'] }}px; --li-num:{{ s['num'] }}px;
+            --li-cap:{{ s['cap'] }}px; --li-chip:{{ s['chip'] }}px; --li-chip-pad:{{ s['chipPad'] }};
+            --li-chip-mb:{{ s['chipMb'] }}px; --li-pad:{{ s['pad'] }}px;
+            --li-g1:{{ s['g1'] }}px; --li-g2:{{ s['g2'] }}px">
+  {% for it in items %}
+  {% set bank    = it.bank         | default('', true) %}
+  {% set iname   = it.name         | default('', true) %}
+  {% set thr     = it.threshold    | default('', true) %}
+  {% set dl      = it.deadline     | default('', true) %}
+  {% set reward  = it.reward       | default('', true) %}
+  {% set rlabel  = it.reward_label | default('', true) %}
+  {% set status  = it.status       | default('', true) %}
+  {% set tone    = it.tone         | default('', true) %}
+  {% set rtone   = it.reward_tone  | default('gain', true) %}
+  <div class="list-item">
+    <div class="list-no">{{ "%02d" | format(loop.index) }}</div>
+
+    <div class="list-main">
+      {% if bank %}<div class="list-bank clamp-1">{{ bank }}</div>{% endif %}
+      {% if iname %}<div class="list-name clamp-1">{{ iname | rich }}</div>{% endif %}
+      {% if thr or dl %}
+      <div class="list-meta">
+        {% if thr %}<span class="list-thr clamp-1"><span class="list-tag">门槛</span>{{ thr }}</span>{% endif %}
+        {% if dl %}
+        <span class="list-dl {{ 'warn' if tone == 'warn' else '' }}">
+          <span class="list-tag">截止</span><span class="num">{{ dl }}</span>
+        </span>
+        {% endif %}
+      </div>
+      {% endif %}
+    </div>
+
+    <div class="list-pay">
+      {% if status %}
+      <span class="chip {{ 'on-' ~ tone if tone in ('warn', 'gain', 'accent') else '' }}">{{ status }}</span>
+      {% endif %}
+      {% if rlabel %}<span class="list-cap">{{ rlabel }}</span>{% endif %}
+      {% if reward %}
+      <span class="num list-num {{ 'accent' if rtone == 'accent' else ('gain' if rtone == 'gain' else '') }}"
+            data-fit data-fit-h="{{ s['numh'] }}" data-fit-min="0.42">{{ reward }}</span>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if note %}
+<div class="list-note">
+  <span class="callout-k">{{ d.note_label | default('提示', true) }}</span>
+  <span class="small clamp-1 grow">{{ note }}</span>
+</div>
+{% endif %}
+{% endblock %}

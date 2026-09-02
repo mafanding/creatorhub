@@ -1,0 +1,173 @@
+{% extends "_layout.html.j2" %}
+{# 对比卡：2-3 个对象 × 3-5 个维度的横向对比表 + 底部一句结论。
+
+   高度是死的，文案长度是活的。_layout 有整体缩放兜底，但那是最后一道防线
+   （一触发整张卡连页眉页脚一起缩小，看得出来），不能当设计手段用。
+   这里从源头把最小高度锁死：
+     · 每个单元格 [data-fit] 强制一行，长了自己缩字号；
+     · 表格 height:100%，行高由剩余空间平分 —— 3 行不空、5 行不挤。
+
+   模板用 StrictUndefined 渲染，所以除 title / columns / rows 外
+   一律 `| default(..., true)` 兜住缺键。 #}
+
+{% block style %}
+.cmp-title { margin-top: 14px; }
+.cmp-title em { font-style: normal; color: var(--accent); }
+/* line-height 压到 1.4（.sub 原本 1.62）：两行副标题省下 14px 让给表格，
+   这是下面高度预算里买回来的空间，不是随手改的。 */
+.cmp-sub { margin-top: 18px; max-width: 860px; line-height: 1.4; }
+
+/* 表格区吃掉标题和结论之间的空间，行高由剩余空间平分 → 不留死白。
+   但 3 行 × 空荡荡的数据会把行撑到 270px，所以 .cmp-tblbox 给一个按行数算的
+   上限 min(100%, 目标)：挤的时候填满，松的时候按上限居中，两头都不难看。
+   overflow:hidden 只是兜底，正常情况下靠 data-fit 保证不会溢出。 */
+.cmp-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 28px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.cmp-tblbox { min-height: 0; }
+.cmp-tbl {
+  width: 100%;
+  height: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.cmp-tbl th,
+.cmp-tbl td { text-align: center; }
+.cmp-tbl th { padding: 12px 12px 16px; vertical-align: bottom; border-bottom: 2px solid var(--ink); }
+.cmp-tbl td { vertical-align: middle; border-bottom: 1px solid var(--hairline); }
+.cmp-c3 td { padding: 12px 12px; }
+.cmp-c2 td { padding: 11px 14px; }
+.cmp-tbl tbody tr:last-child td { border-bottom: 1px solid var(--rule); }
+.cmp-tbl th + th,
+.cmp-tbl td + td { border-left: 1px solid var(--hairline); }
+
+/* 首列是维度名，左对齐贴边 */
+.cmp-tbl th:first-child,
+.cmp-tbl td:first-child { text-align: left; padding-left: 0; }
+.cmp-c2 th:first-child { width: 240px; }
+.cmp-c3 th:first-child { width: 214px; }
+
+.cmp-lbl { font-size: var(--t-body); font-weight: 600; color: var(--ink-2); line-height: 1.3; }
+/* 口径补充跟在维度名后面，不另起一行 —— 多一行 × 5 行就撑破表格。
+   字号必须写成 em 才能跟着 data-fit 一起缩（写死 px 的子元素不会跟着缩）。
+   0.62em ≈ --t-micro(22) / --t-body(32)，取值仍然锚在设计系统的字阶上。 */
+.cmp-hint {
+  margin-left: 8px;
+  font-size: 0.62em;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.cmp-name { font-weight: 700; line-height: 1.25; }
+.cmp-c2 .cmp-name { font-size: var(--t-h2); }
+.cmp-c3 .cmp-name { font-size: var(--t-h3); }
+/* 副行/标签行高度写死，且「有一列有就每列都占位」，否则各列卡名对不齐 */
+.cmp-note { margin-top: 6px; height: 34px; }
+.cmp-tagline { margin-bottom: 8px; height: 50px; }
+
+.cmp-val { font-weight: 600; line-height: 1.3; }
+.cmp-c2 .cmp-val { font-size: var(--t-h3); }
+.cmp-c3 .cmp-val { font-size: var(--t-body); }
+
+/* 胜出列：整列淡底 + 顶部红盖头 + 数值也用强调色，缩到 1/3 也能一眼找到 */
+.cmp-hot { background: var(--accent-bg); }
+th.cmp-hot { border-top: 4px solid var(--accent); }
+td.cmp-hot .cmp-val { color: var(--accent); }
+
+/* 结论块。原来是 .card（白底 + 一圈细框 + 一枚 chip 当标签），和 tips 的小结、
+   detail 的踩坑提醒三块各长一个样；现在统一走 _base.css 的 .callout：
+   左边一道红杠 + 淡红底 + 不带底色的标签。
+   顺带比原来矮约 15px（少了上下边框和 6px 内边距），表格反而更宽裕，
+   所以上面那份「5 行 × 3 列会压到最后一行」的预算只会更松。 */
+.cmp-concl { flex: 0 0 auto; margin-top: 24px; }
+{% endblock %}
+
+{% block body %}
+{% set cols = d.columns[:3] %}
+{% set rows = d.rows[:5] %}
+{% set n = cols | length %}
+{% set kicker = d.kicker | default('', true) %}
+{% set subtitle = d.subtitle | default('', true) %}
+{% set axis_label = d.axis_label | default('', true) %}
+{% set conclusion = d.conclusion | default('', true) %}
+{% set mark = d.conclusion_mark | default('', true) %}
+{# 只要有一列用到了 note / 推荐标签，每一列就都留出这一行的位置，卡名才对得齐 #}
+{% set _notes = [] %}
+{% set _bests = [] %}
+{% for c in cols %}
+{% if c.note | default('', true) %}{% set _ = _notes.append(1) %}{% endif %}
+{% if c.best | default(false, true) %}{% set _ = _bests.append(1) %}{% endif %}
+{% endfor %}
+{% set any_note = _notes | length > 0 %}
+{% set any_best = _bests | length > 0 %}
+
+{% if kicker %}<div class="kicker">{{ kicker }}</div>{% endif %}
+<h1 class="h1 cmp-title" data-fit data-fit-h="172" data-fit-min="0.6">{{ d.title | rich }}</h1>
+{% if subtitle %}<p class="sub cmp-sub clamp-2">{{ subtitle }}</p>{% endif %}
+
+<div class="cmp-wrap">
+ <div class="cmp-tblbox" style="height: min(100%, {{ 172 + rows | length * 150 }}px)">
+  <table class="cmp-tbl cmp-c{{ n }}">
+    <thead>
+      <tr>
+        <th>{% if axis_label %}<div class="micro">{{ axis_label }}</div>{% endif %}</th>
+        {% for c in cols %}
+        {% set best = c.best | default(false, true) %}
+        {% set note = c.note | default('', true) %}
+        <th class="{{ 'cmp-hot' if best else '' }}">
+          {% if any_best %}
+          <div class="cmp-tagline">{% if best %}<span class="chip on-accent">{{ c.tag | default('推荐', true) }}</span>{% endif %}</div>
+          {% endif %}
+          <div class="cmp-name" data-fit data-fit-h="{{ 62 if n == 2 else 50 }}" data-fit-min="0.6">{{ c.name }}</div>
+          {% if any_note %}<div class="micro cmp-note" data-fit data-fit-h="34" data-fit-min="0.7">{{ note }}</div>{% endif %}
+        </th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      {% set cells = r.cells | default([], true) %}
+      {% set hint = r.hint | default('', true) %}
+      <tr>
+        <td>
+          {# 43 = 32px 单行(41.6) 刚好过、双行必不过。放宽到 45 会被「第二行只剩小字 hint」
+             这种矮行盒钻空子，于是维度名换行、hint 掉一个字下去 —— 别调大。 #}
+          <div class="cmp-lbl" data-fit data-fit-h="43" data-fit-min="0.55">
+            {{- r.label }}{% if hint %}<span class="cmp-hint">{{ hint }}</span>{% endif %}
+          </div>
+        </td>
+        {% for c in cols %}
+        {% set v = (cells[loop.index0] if loop.index0 < (cells | length) else '—') | string %}
+        <td class="{{ 'cmp-hot' if c.best | default(false, true) else '' }}">
+          <div class="cmp-val {{ 'num' if ('0123456789' | select('in', v) | list | length) > 0 else '' }}"
+               data-fit data-fit-h="{{ 50 if n == 2 else 44 }}" data-fit-min="0.62">{{ v }}</div>
+        </td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+ </div>
+</div>
+
+{% if conclusion %}
+<div class="callout cmp-concl">
+  <span class="callout-k">{{ d.conclusion_label | default('结论', true) }}</span>
+  <p class="callout-t h3 clamp-2">
+    {%- if mark and mark in conclusion -%}
+      {%- set parts = conclusion.split(mark, 1) -%}
+      {{- parts[0] }}<span class="mark-hl">{{ mark }}</span>{{ parts[1] -}}
+    {%- else -%}
+      {{- conclusion -}}
+    {%- endif -%}
+  </p>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,325 @@
+/* ── CreatorHub 卡片设计系统 ────────────────────────────────────────────────
+ *
+ * 画布固定 1080×1440（小红书 3:4），2× 截图。
+ * 这一层只定**结构**（画布、栅格、字号阶梯、防溢出）；每个人设长什么样
+ * （配色、字族、质感）由 app/ai/themes/<name>.css 覆盖 :root 决定。
+ * 默认取向是账本 / 凭条，那只是「没选风格」时的兜底，不是唯一取向。
+ *
+ * 所有尺寸写死成 px（画布尺寸固定，不需要响应式）。
+ * 文案由 AI 生成，长度不可控 —— 所以凡是可能溢出的地方都用 [data-fit]
+ * 自动缩字号，或 .clamp-N 截断。永远不要让卡片撑破。
+ */
+
+:root {
+  --paper:      #F7F5F0;
+  --paper-2:    #FFFFFF;
+  --ink:        #14130F;
+  --ink-2:      #3A382F;
+  --muted:      #85806F;
+  --rule:       #D9D3C4;
+  --hairline:   #E8E3D7;
+
+  --accent:     #C8402C;   /* 印章红：强调、数字、当日主角 */
+  --accent-bg:  #F6E7E2;
+  --gain:       #2F6B4F;   /* 到手 / 返现 */
+  --gain-bg:    #E4EDE6;
+  --warn:       #A8721C;   /* 截止 / 注意 */
+  --warn-bg:    #F5EBD8;
+
+  --ink-dark:   #14130F;   /* 深色卡背景 */
+  --paper-dark: #F2EFE7;
+  --on-accent:  #FFFFFF;   /* 铺在 --accent / --ink 实底上的字色。别再写字面 #fff */
+
+  /* 强调条：小结 / 提醒 / 产品便签左边那道竖杠，全站统一一个宽度 */
+  --bar: 6px;
+
+  --pad:        76px;
+  --gap:        28px;
+
+  --t-hero:     102px;
+  --t-h1:       68px;
+  --t-h2:       48px;
+  --t-h3:       38px;
+  --t-body:     32px;
+  --t-small:    27px;
+  --t-micro:    22px;
+
+  --sans: "PingFang SC", "Hiragino Sans GB", "Heiti SC", "Microsoft YaHei",
+          -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  --mono: "SF Mono", ui-monospace, Menlo, "PingFang SC", monospace;
+
+  /* 深色卡（.canvas.dark）的一整套。风格文件覆盖这些，不要覆盖上面的 --ink-dark
+     —— 那个只是 --d-bg 的旧名字，留着是为了不破坏已有模板。 */
+  --d-bg:        #14130F;
+  --d-bg-2:      #1D1B16;
+  --d-ink:       #F2EFE7;
+  --d-ink-2:     #C9C4B6;
+  --d-muted:     #8A8577;
+  --d-rule:      #35332B;
+  --d-hairline:  #26241E;
+  --d-accent:    #E4735C;   /* 强调色在深底上要提亮，原样压过去会发闷 */
+  --d-accent-bg: #2A1A16;
+  --d-gain:      #6FB08D;
+  --d-gain-bg:   #17251C;
+  --d-warn:      #D9A441;
+  --d-warn-bg:   #26200F;
+  --d-on-accent: #14130F;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 1080px;
+  height: 1440px;
+  overflow: hidden;
+  background: var(--paper);
+}
+
+body {
+  font-family: var(--sans);
+  color: var(--ink);
+  font-size: var(--t-body);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+}
+
+.canvas {
+  position: relative;
+  width: 1080px;
+  height: 1440px;
+  padding: var(--pad);
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+  overflow: hidden;
+}
+
+/* 深色变体：封面卡和 stat 卡用它。
+ *
+ * 这一整套颜色**必须走变量**，不能像以前那样写死。封面是读者唯一必看的一张，
+ * 硬编码的结果是：不管项目选了什么视觉风格，最显眼的那张卡永远长一个样。
+ * 「不同项目图片风格太统一」的根子就在这儿。
+ * 默认值在 :root 的 --d-* 里，风格文件覆盖它们。 */
+.canvas.dark {
+  background: var(--d-bg);
+  color: var(--d-ink);
+  --ink: var(--d-ink);
+  --ink-2: var(--d-ink-2);
+  --muted: var(--d-muted);
+  --rule: var(--d-rule);
+  --hairline: var(--d-hairline);
+  --paper: var(--d-bg);
+  --paper-2: var(--d-bg-2);
+  --accent: var(--d-accent);
+  --accent-bg: var(--d-accent-bg);
+  --gain-bg: var(--d-gain-bg);
+  --warn-bg: var(--d-warn-bg);
+  /* 前景色也要跟着提亮：#2F6B4F / #A8721C 压在近黑上根本读不出来。 */
+  --gain: var(--d-gain);
+  --warn: var(--d-warn);
+  --on-accent: var(--d-on-accent);
+}
+
+/* ── 页眉 / 页脚 ───────────────────────────────────────────────────────── */
+
+.hdr {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: 22px;
+  border-bottom: 2px solid var(--ink);
+  flex: 0 0 auto;
+}
+
+.hdr .mark {
+  font-size: var(--t-small);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.hdr .meta {
+  font-family: var(--mono);
+  font-size: var(--t-micro);
+  color: var(--muted);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+}
+
+.ftr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 20px;
+  border-top: 1px solid var(--hairline);
+  font-size: var(--t-micro);
+  color: var(--muted);
+  letter-spacing: 0.08em;
+  flex: 0 0 auto;
+}
+
+.ftr .pager {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 46px 0 30px;
+  overflow: hidden;
+}
+
+/* ── 排版原子 ──────────────────────────────────────────────────────────── */
+
+/* 眉标。一篇笔记里六七张卡叠着看，这一行是「同一个人做的」最强的信号，
+ * 所以字号、颜色、字间距全部锁死在这里 —— 模板不要再各自 override letter-spacing
+ * （曾经出现过 .18 / .20 / .22 / .24 四个值，纯属手滑）。
+ *
+ * 眉标位只有两种合法长相，别再发明第三种：
+ *   1. .kicker         —— 栏目名 / 系列名这类编辑性标签，红字，全站默认；
+ *   2. 实底 ink 小方块 —— 只给专有名词（银行名，见 detail 的 .dt-bank），
+ *                          和 .index-badge 同一种「盖章」语言。
+ * 右侧配一枚 .chip 做计数或状态，也是全站统一的。
+ */
+.kicker {
+  font-size: var(--t-small);
+  letter-spacing: 0.2em;
+  color: var(--accent);
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.hero   { font-size: var(--t-hero); font-weight: 700; line-height: 1.16; letter-spacing: -0.02em; }
+.h1     { font-size: var(--t-h1);   font-weight: 700; line-height: 1.24; letter-spacing: -0.01em; }
+.h2     { font-size: var(--t-h2);   font-weight: 700; line-height: 1.3; }
+.h3     { font-size: var(--t-h3);   font-weight: 600; line-height: 1.35; }
+.sub    { font-size: var(--t-body); color: var(--ink-2); line-height: 1.62; }
+.small  { font-size: var(--t-small); color: var(--muted); line-height: 1.55; }
+.micro  { font-size: var(--t-micro); color: var(--muted); letter-spacing: 0.08em; }
+
+.num    { font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 600; }
+.accent { color: var(--accent); }
+.gain   { color: var(--gain); }
+.warn   { color: var(--warn); }
+
+.mark-hl {
+  background: linear-gradient(transparent 58%, var(--accent-bg) 58%);
+  padding: 0 4px;
+}
+
+/* 印章：右上角盖一枚，视觉记忆点 */
+.stamp {
+  position: absolute;
+  top: 130px;
+  right: 60px;
+  width: 168px;
+  height: 168px;
+  border: 5px solid var(--accent);
+  border-radius: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  transform: rotate(-11deg);
+  opacity: 0.9;
+  text-align: center;
+  line-height: 1.15;
+}
+.stamp .s-top { font-size: 21px; letter-spacing: 0.16em; }
+.stamp .s-main { font-size: 40px; font-weight: 800; letter-spacing: 0.02em; }
+.stamp .s-bot { font-size: 19px; letter-spacing: 0.12em; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 18px;
+  border: 1.5px solid var(--rule);
+  border-radius: 999px;
+  font-size: var(--t-micro);
+  color: var(--ink-2);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.chip.on-accent { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
+.chip.on-gain   { border-color: var(--gain);   color: var(--gain);   background: var(--gain-bg); }
+.chip.on-warn   { border-color: var(--warn);   color: var(--warn);   background: var(--warn-bg); }
+
+/* ── 强调块 ────────────────────────────────────────────────────────────
+ * 卡片底部那句「小结 / 踩坑提醒 / 结论」共用一个形状：左边一道竖杠 + 淡色底
+ * + 一个不带底色的标签。语义只换颜色（默认红＝结论，.on-warn 黄＝警告），
+ * 形状永远不换 —— 六张卡放在同一篇笔记里，这块必须一眼认得出是同一个东西。
+ *
+ * padding 的 14px 是算过的：tips 的高度预算只剩 ~10px 余量，纵向内边距
+ * 再大一点就会把它的列表挤掉一行。要改先去 tips.html.j2 顶上重算一遍。
+ * 标签用 baseline 对齐，字号不同也能自动跟正文第一行对齐，不用手调 margin。
+ */
+.callout {
+  display: flex;
+  align-items: baseline;
+  gap: 20px;
+  padding: 14px 26px;
+  background: var(--accent-bg);
+  border-left: var(--bar) solid var(--accent);
+}
+.callout.on-warn { background: var(--warn-bg); border-left-color: var(--warn); }
+
+.callout-k {
+  flex: 0 0 auto;
+  font-size: var(--t-micro);
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  white-space: nowrap;
+}
+.callout.on-warn .callout-k { color: var(--warn); }
+.callout-t { flex: 1 1 auto; min-width: 0; }
+
+.rule      { height: 2px; background: var(--ink); border: 0; }
+.hairline  { height: 1px; background: var(--hairline); border: 0; }
+.dotted    { height: 0; border-top: 2px dotted var(--rule); }
+
+.card {
+  background: var(--paper-2);
+  border: 1.5px solid var(--rule);
+  padding: 30px 34px;
+}
+
+.stack   { display: flex; flex-direction: column; }
+.row     { display: flex; align-items: center; }
+.between { justify-content: space-between; }
+.grow    { flex: 1 1 auto; min-width: 0; min-height: 0; }
+.spacer  { flex: 1 1 auto; }
+
+.gap-8  { gap: 8px; }  .gap-12 { gap: 12px; } .gap-16 { gap: 16px; }
+.gap-20 { gap: 20px; } .gap-24 { gap: 24px; } .gap-32 { gap: 32px; }
+
+/* 溢出保护：AI 写多了也不会撑破卡片 */
+.clamp-1, .clamp-2, .clamp-3, .clamp-4 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.clamp-1 { -webkit-line-clamp: 1; }
+.clamp-2 { -webkit-line-clamp: 2; }
+.clamp-3 { -webkit-line-clamp: 3; }
+.clamp-4 { -webkit-line-clamp: 4; }
+
+.index-badge {
+  flex: 0 0 auto;
+  width: 54px; height: 54px;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--paper);
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono);
+  font-size: 28px;
+  font-weight: 700;
+}
+.canvas.dark .index-badge { background: var(--accent); color: var(--on-accent); }
