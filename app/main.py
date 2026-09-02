@@ -3853,7 +3853,7 @@ def _clean_string_list(values: list[str], *, limit: int, item_limit: int) -> lis
     return cleaned
 
 
-def _rule_dict(rule: DmAutoReplyRule) -> dict:
+def _dm_rule_dict(rule: DmAutoReplyRule) -> dict:
     def load(raw: str) -> list:
         try:
             value = json.loads(raw or "[]")
@@ -3908,7 +3908,7 @@ async def list_dm_auto_reply_rules(account_id: int):
         rows = session.exec(select(DmAutoReplyRule).where(
             DmAutoReplyRule.account_id == account_id
         ).order_by(DmAutoReplyRule.id.asc())).all()
-        return [_rule_dict(row) for row in rows]
+        return [_dm_rule_dict(row) for row in rows]
 
 
 @app.post("/api/dm/auto-reply-rules")
@@ -3920,7 +3920,7 @@ async def create_dm_auto_reply_rule(body: DmAutoReplyRuleIn):
         rule = DmAutoReplyRule(account_id=body.account_id, platform="xhs")
         _apply_rule_input(rule, body)
         session.add(rule); session.commit(); session.refresh(rule)
-        return _rule_dict(rule)
+        return _dm_rule_dict(rule)
 
 
 @app.put("/api/dm/auto-reply-rules/{rule_id}")
@@ -3933,7 +3933,7 @@ async def update_dm_auto_reply_rule(rule_id: int, body: DmAutoReplyRuleIn):
             raise HTTPException(400, "规则与账号不匹配")
         _apply_rule_input(rule, body)
         session.add(rule); session.commit(); session.refresh(rule)
-        return _rule_dict(rule)
+        return _dm_rule_dict(rule)
 
 
 @app.delete("/api/dm/auto-reply-rules/{rule_id}")
@@ -9324,7 +9324,7 @@ class CommentRuleUpdate(BaseModel):
     target: str | None = None
 
 
-def _rule_dict(r: CommentRule) -> dict:
+def _comment_rule_dict(r: CommentRule) -> dict:
     return {
         "id": r.id, "platform": r.platform, "name": r.name, "mode": r.mode,
         "account_id": r.account_id, "target_kind": r.target_kind,
@@ -9405,7 +9405,7 @@ async def list_comment_rules(platform: str | None = None):
         q = select(CommentRule)
         if platform:
             q = q.where(CommentRule.platform == platform)
-        return [_rule_dict(r) for r in s.exec(q.order_by(CommentRule.id.desc())).all()]
+        return [_comment_rule_dict(r) for r in s.exec(q.order_by(CommentRule.id.desc())).all()]
 
 
 @app.post("/api/comment-rules")
@@ -9438,7 +9438,7 @@ async def add_comment_rule(body: CommentRuleIn):
             max_per_run=max(1, body.max_per_run),
             interval_seconds=max(60, body.interval_seconds), enabled=body.enabled)
         s.add(r); s.commit(); s.refresh(r)
-        return _rule_dict(r)
+        return _comment_rule_dict(r)
 
 
 @app.put("/api/comment-rules/{rid}")
@@ -9502,7 +9502,7 @@ async def update_comment_rule(rid: int, body: CommentRuleUpdate):
         if body.enabled is not None:
             r.enabled = body.enabled
         s.add(r); s.commit(); s.refresh(r)
-        return _rule_dict(r)
+        return _comment_rule_dict(r)
 
 
 @app.delete("/api/comment-rules/{rid}")
