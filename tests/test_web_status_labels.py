@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -167,3 +168,28 @@ def test_kuaishou_publish_view_reuses_the_account_browser():
     assert '["kuaishou", "shipinhao"].includes(t.platform)' in publish
     assert "快手作品管理页" in publish
     assert "不能交给系统浏览器" in publish
+
+
+def test_generic_dialog_stacks_above_every_other_overlay():
+    # uiConfirm / uiSelect / uiPrompt 经常是从另一个弹窗里打开的(草稿弹窗里点
+    # 「转为发布任务」)。同 z-index 时 DOM 靠后的那个赢,于是它会开在下面:
+    # 看得见、点不着,而点下去会命中下层 overlay 的关闭区 —— 弹窗一关,
+    # 后面那个请求就打到 /api/ai/drafts/null/... 上,只回一个 422。
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    base = re.search(r"\.pv-overlay\s*\{[^}]*z-index:\s*(\d+)", html)
+    ui = re.search(r"#uimodal\s*\{[^}]*z-index:\s*(\d+)", html)
+    assert base and ui, "找不到 .pv-overlay 或 #uimodal 的 z-index"
+    assert int(ui.group(1)) > int(base.group(1))
+
+
+def test_ai_draft_actions_capture_the_draft_id_before_awaiting():
+    # 这几个函数中间都 await 一个弹窗。等待期间草稿弹窗可能被关掉
+    # (AI_DRAFT_ID 置空),所以 id 必须在 await 之前拿在手里。
+    source = APP_JS.read_text(encoding="utf-8")
+    start = source.index("async function saveAiDraft()")
+    end = source.index("// ── 人设档案 ──", start)
+    block = source[start:end]
+    assert "${AI_DRAFT_ID}" not in block, "请求 URL 里还在直接用 AI_DRAFT_ID"
+    for fn in ("saveAiDraft", "rerenderAiDraft", "regenerateAiDraft", "aiDraftToPublish"):
+        body_start = block.index(f"async function {fn}()")
+        assert "const id = AI_DRAFT_ID;" in block[body_start:body_start + 400], fn
