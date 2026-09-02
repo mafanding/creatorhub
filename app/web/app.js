@@ -851,6 +851,9 @@ const PAGE_META = {
   publish: {
     title: "内容发布", desc: "准备素材与文案，创建立即或定时发布任务。"
   },
+  "ai-studio": {
+    title: "AI 创作", desc: "用提示词 + API 生成正文与配图卡片，人工过目后转成发布任务。"
+  },
   queue: {
     title: "任务队列", desc: "统一查看采集、发布、评论、账号动作与下载任务的排队、执行和阻塞状态。"
   },
@@ -904,6 +907,7 @@ function switchPlatform(pf) {
   if (CURRENT_TAB === "risk-control") refreshRiskCenter(true);
   populateAcAccount(); onAcMode(); refreshCommentRules(); refreshCommentTasks();
   if (pfHasPublish(PLATFORM)) refreshPublish();
+  if (CURRENT_TAB === "ai-studio") refreshAiStudio();
 }
 function applyPlatformUI() {
   document.body.classList.toggle("pf-douyin", PLATFORM === "douyin");
@@ -1232,6 +1236,8 @@ function switchTab(name, pushHistory = false) {
   if (name === "queue") refreshTaskQueue();
   if (name === "risk-control") refreshRiskCenter();
   if (name === "accounts") refreshCloakBrowser();
+  if (name === "ai-studio") refreshAiStudio();
+  else { clearTimeout(AI_POLL); AI_POLL = null; }
 }
 
 // ─── 扫码登录(真实浏览器窗口) ───
@@ -3739,6 +3745,7 @@ async function loadSettings() {
       $("ai-prompt").value = s.ai_prompt || "";
       $("ai-key").placeholder = s.ai_api_key_set ? "已保存(留空=不修改)" : "API Key";
     }
+    fillAiContentSettings(s);
     csSyncAll();
   } catch (e) {}
 }
@@ -7007,6 +7014,486 @@ function loop() {
   if (CURRENT_TAB === "collections") refreshCollections();
   if (CURRENT_TAB === "risk-control") refreshRiskCenter();
   if (CURRENT_TAB === "queue") refreshTaskQueue(); else refreshTaskQueueBadge();
+  if (CURRENT_TAB === "ai-studio") refreshAiDrafts();
+}
+
+// ─── AI 创作 ───
+// 一行草稿就是一个任务:pending → generating → rendering → ready | failed。
+// 状态在后端那一行上,前端只管轮询 —— 刷新页面不会丢进度。
+const AI_ST = { pending: "排队中", generating: "写稿中", rendering: "渲染中", ready: "可用", failed: "失败" };
+const AI_PILL = { pending: "pending", generating: "downloading", rendering: "downloading", ready: "done", failed: "failed" };
+let AI_BRANDS = [];
+let AI_CATALOG = null;
+let AI_DRAFTS = [];
+let AI_BRAND_ID = null;      // 人设弹窗正在编辑的那一条(null = 新建)
+let AI_DRAFT_ID = null;      // 草稿弹窗正在看的那一篇
+let AI_POLL = null;
+
+// 换掉 <select> 的 options 之后要叫一声,否则美化过的自定义下拉还显示旧值。
+function syncSelect(sel) { if (sel && sel._csSync) sel._csSync(); }
+
+async function aiCatalog() {
+  if (!AI_CATALOG) AI_CATALOG = await api("/api/ai/catalog");
+  return AI_CATALOG;
+}
+
+function aiSelectedBrand() {
+  const id = Number($("ai-brand-pick") ? $("ai-brand-pick").value : 0);
+  return AI_BRANDS.find(b => b.id === id) || null;
+}
+
+async function refreshAiBrands() {
+  if (!$("ai-brand-pick")) return;
+  try { AI_BRANDS = await api("/api/ai/brands"); } catch (e) { return; }
+  const sel = $("ai-brand-pick");
+  const keep = sel.value;
+  sel.innerHTML = '<option value="">（不用人设，只按方向写）</option>' +
+    AI_BRANDS.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("");
+  if (AI_BRANDS.some(b => String(b.id) === keep)) sel.value = keep;
+  else if (!keep && AI_BRANDS.length) sel.value = String(AI_BRANDS[0].id);
+  syncSelect(sel);
+}
+
+async function refreshAiAccounts() {
+  if (!$("ai-draft-acc")) return;
+  try {
+    const rows = await api("/api/accounts?platform=" + (pfHasPublish(PLATFORM) ? PLATFORM : "xhs"));
+    const sel = $("ai-draft-acc");
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">（发布时再选）</option>' +
+      rows.map(a => `<option value="${a.id}">${esc(a.nickname || ("账号 " + a.id))}</option>`).join("");
+    if (rows.some(a => String(a.id) === keep)) sel.value = keep;
+    syncSelect(sel);
+  } catch (e) {}
+}
+
+async function refreshAiDrafts() {
+  if (!$("ai-draft-table")) return;
+  let rows;
+  try {
+    rows = await api("/api/ai/drafts?platform=" + (pfHasPublish(PLATFORM) ? PLATFORM : "xhs"));
+  } catch (e) {
+    $("ai-draft-table").innerHTML = empty(7, "读取失败", "i-info", e.message);
+    return;
+  }
+  AI_DRAFTS = rows;
+  if ($("tb-ai")) $("tb-ai").textContent = rows.length;
+  const brandName = id => (AI_BRANDS.find(b => b.id === id) || {}).name || "—";
+  $("ai-draft-table").innerHTML = rows.map(d => {
+    const bad = (d.problems || []).length;
+    return `<tr>
+      <td class="wrap" style="max-width:280px">${esc(d.title || d.direction || "(还没有标题)")}</td>
+      <td>${esc(brandName(d.brand_id))}</td>
+      <td><span class="pill ${AI_PILL[d.status] || "pending"}">${AI_ST[d.status] || d.status}</span>${
+        d.status === "ready" && bad ? ` <span class="pill failed">${bad} 处待改</span>` : ""}${
+        d.publish_task_id ? ' <span class="pill done">已转发布</span>' : ""}</td>
+      <td class="num">${d.image_count}</td>
+      <td class="mut" style="font-size:12px">${esc(d.model || "—")}</td>
+      <td class="mut" style="font-size:12px">${esc((d.created_at || "").replace("T", " ").slice(5, 16))}</td>
+      <td class="acttd">
+        <button class="ghost sm" onclick="openAiDraft(${d.id})">${ic("i-eye")}查看</button>
+        <button class="ghost sm danger" onclick="deleteAiDraft(${d.id})">${ic("i-trash")}删除</button>
+      </td></tr>`;
+  }).join("") || empty(7, "还没有草稿", "i-bolt", "上面填个方向就能生成一篇");
+  aiSchedulePoll(rows.some(d => d.status !== "ready" && d.status !== "failed"));
+}
+
+// 有任务在跑的时候盯紧一点(3 秒),都跑完了就交回 8 秒的全局节拍。
+function aiSchedulePoll(active) {
+  clearTimeout(AI_POLL);
+  AI_POLL = null;
+  if (!active || CURRENT_TAB !== "ai-studio") return;
+  AI_POLL = setTimeout(() => {
+    refreshAiDrafts();
+    if (AI_DRAFT_ID) openAiDraft(AI_DRAFT_ID, true);
+  }, 3000);
+}
+
+async function refreshAiStudio() {
+  await refreshAiBrands();
+  refreshAiAccounts();
+  refreshAiDrafts();
+  aiChannelNote();
+}
+
+async function aiChannelNote() {
+  if (!$("ai-channel-note")) return;
+  try {
+    const s = await api("/api/settings");
+    const eff = s.ai_content_effective || {};
+    $("ai-channel-note").innerHTML = eff.ready
+      ? `正文与卡片数据由 <b>${esc(eff.model)}</b>（${esc(eff.provider)}）生成，配图由本地模板渲染成 1080×1440 PNG —— 不是文生图。`
+      : `<b>通道还不能用：${esc(eff.why || "没配置")}</b> 去「设置 → AI 内容创作」里配一下。`;
+  } catch (e) {}
+}
+
+async function startAiDraft() {
+  const btn = evtBtn();
+  const body = {
+    brand_id: Number($("ai-brand-pick").value) || null,
+    account_id: Number($("ai-draft-acc").value) || null,
+    platform: pfHasPublish(PLATFORM) ? PLATFORM : "xhs",
+    direction: $("ai-direction").value.trim(),
+    facts: $("ai-facts").value.trim(),
+  };
+  await withBusy(btn, "提交中", async () => {
+    try {
+      const d = await api("/api/ai/drafts", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      $("ai-studio-msg").textContent = "已排进后台，写稿加渲染大约要一两分钟。";
+      toast("开始生成 ✓", "ok");
+      AI_DRAFT_ID = null;
+      refreshAiDrafts();
+    } catch (e) {
+      $("ai-studio-msg").textContent = "失败：" + e.message;
+      toast("提交失败：" + e.message, "err", 8000);
+    }
+  });
+}
+
+async function deleteAiDraft(id) {
+  if (!await uiConfirm({ title: "删除草稿", message: "连同渲染出来的图一起删掉，不可恢复。", okText: "删除", danger: true })) return;
+  try {
+    await api(`/api/ai/drafts/${id}`, { method: "DELETE" });
+    if (AI_DRAFT_ID === id) hideAiDraftModal();
+    refreshAiDrafts();
+  } catch (e) { toast("删除失败：" + e.message, "err"); }
+}
+
+// ── 草稿详情 ──
+async function openAiDraft(id, silent = false) {
+  let d;
+  try { d = await api(`/api/ai/drafts/${id}`); }
+  catch (e) { if (!silent) toast("读取失败：" + e.message, "err"); return; }
+  AI_DRAFT_ID = id;
+  const modal = $("ai-draft-modal");
+  const running = d.status !== "ready" && d.status !== "failed";
+  $("ai-d-title").textContent = d.title || "创作草稿";
+  const usage = d.usage || {};
+  $("ai-d-meta").textContent = [
+    AI_ST[d.status] || d.status,
+    d.model || "",
+    d.attempts ? `自检 ${d.attempts} 轮` : "",
+    usage.output ? `输出 ${usage.output} tokens` : "",
+    d.publish_task_id ? `已转发布任务 #${d.publish_task_id}` : "",
+  ].filter(Boolean).join(" · ");
+
+  const problems = d.problems || [];
+  $("ai-d-problems").innerHTML = d.error
+    ? `<div class="form-note" style="border-color:color-mix(in srgb,var(--danger) 40%,var(--line))"><svg aria-hidden="true"><use href="#i-info"/></svg><span><b>失败：</b>${esc(d.error)}</span></div>`
+    : (problems.length
+      ? `<div class="form-note" style="border-color:color-mix(in srgb,var(--danger) 40%,var(--line))"><svg aria-hidden="true"><use href="#i-info"/></svg><span><b>预检没过（改完这些才能发）：</b><br>${problems.map(esc).join("<br>")}</span></div>`
+      : (running ? `<div class="form-note"><svg aria-hidden="true"><use href="#i-clock"/></svg><span>${AI_ST[d.status]}…这一步大约要一两分钟，页面关掉也不影响。</span></div>` : ""));
+
+  const stamp = encodeURIComponent(d.updated_at || "");
+  $("ai-d-images").innerHTML = Array.from({ length: d.image_count }, (_, i) =>
+    `<a href="/api/ai/drafts/${id}/images/${i}?t=${stamp}" target="_blank" rel="noopener"
+        title="第 ${i + 1} 张，点开看大图" style="display:block;flex:0 0 auto;line-height:0">
+       <img src="/api/ai/drafts/${id}/images/${i}?t=${stamp}" alt="第 ${i + 1} 张配图"
+            style="display:block;width:165px;height:220px;object-fit:cover;object-position:top;
+                   border:1px solid var(--line);border-radius:8px;background:var(--bg)">
+     </a>`).join("") || '<span class="mut" style="font-size:12px">还没有图</span>';
+
+  // 正在跑的时候不要覆盖人正在改的输入框
+  if (!silent || !running) {
+    $("ai-d-titlein").value = d.title || "";
+    $("ai-d-content").value = d.content || "";
+    $("ai-d-tags").value = (d.tags || []).join(", ");
+    $("ai-d-cards").value = JSON.stringify(d.cards || [], null, 2);
+  }
+  $("ai-d-notes").textContent = d.notes || "—";
+  $("ai-d-notes-wrap").style.display = d.notes ? "" : "none";
+  aiDraftTitleWidth(); aiDraftLen();
+  if (!silent) { $("ai-d-msg").textContent = ""; modal.style.display = "flex"; modalOpened(modal); }
+  if (running) aiSchedulePoll(true);
+}
+
+function hideAiDraftModal() {
+  const modal = $("ai-draft-modal");
+  modal.style.display = "none";
+  modalClosed(modal);
+  AI_DRAFT_ID = null;
+}
+
+// 中文算 2 个显示单位 —— 和后端 display_width 一个口径,让人当场看到还剩几个字。
+function aiDisplayWidth(s) {
+  let w = 0;
+  for (const ch of String(s || "")) w += /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹯＀-｠￠-￦]|[\u{1F300}-\u{1FAFF}]/u.test(ch) ? 2 : 1;
+  return w;
+}
+function aiDraftTitleWidth() {
+  if (!$("ai-d-titlew")) return;
+  const w = aiDisplayWidth($("ai-d-titlein").value);
+  $("ai-d-titlew").textContent = `${w} / 38 显示单位`;
+  $("ai-d-titlew").style.color = w > 38 ? "var(--danger)" : "";
+}
+function aiDraftLen() {
+  if (!$("ai-d-len")) return;
+  const n = $("ai-d-content").value.length;
+  $("ai-d-len").textContent = `${n} / 950 字`;
+  $("ai-d-len").style.color = n > 950 ? "var(--danger)" : "";
+}
+
+function aiDraftCards() {
+  const raw = $("ai-d-cards").value.trim();
+  if (!raw) return [];
+  const v = JSON.parse(raw);
+  if (!Array.isArray(v)) throw new Error("卡片数据要是一个数组");
+  return v;
+}
+
+async function saveAiDraft() {
+  const btn = evtBtn();
+  let cards;
+  try { cards = aiDraftCards(); }
+  catch (e) { $("ai-d-msg").textContent = "卡片 JSON 读不了：" + e.message; toast("卡片 JSON 读不了", "err"); return; }
+  const body = {
+    title: $("ai-d-titlein").value.trim(),
+    content: $("ai-d-content").value,
+    tags: $("ai-d-tags").value.split(/[,，、\s]+/).filter(Boolean),
+    cards,
+  };
+  await withBusy(btn, "保存中", async () => {
+    try {
+      const d = await api(`/api/ai/drafts/${AI_DRAFT_ID}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      $("ai-d-msg").textContent = (d.problems || []).length
+        ? `已保存，还有 ${d.problems.length} 处没过预检` : "已保存，预检全过 ✓";
+      openAiDraft(AI_DRAFT_ID, true);
+      refreshAiDrafts();
+    } catch (e) { $("ai-d-msg").textContent = "失败：" + e.message; toast("保存失败：" + e.message, "err"); }
+  });
+}
+
+async function rerenderAiDraft() {
+  const btn = evtBtn();
+  await withBusy(btn, "渲染中", async () => {
+    try {
+      const d = await api(`/api/ai/drafts/${AI_DRAFT_ID}/render`, { method: "POST" });
+      $("ai-d-msg").textContent = (d.problems || []).length
+        ? `重渲完了，还有 ${d.problems.length} 处没过预检` : "重渲完了，预检全过 ✓";
+      openAiDraft(AI_DRAFT_ID, true);
+      refreshAiDrafts();
+    } catch (e) { $("ai-d-msg").textContent = "失败：" + e.message; toast("渲染失败：" + e.message, "err", 8000); }
+  });
+}
+
+async function regenerateAiDraft() {
+  if (!await uiConfirm({
+    title: "重新生成", okText: "重新生成",
+    message: "会重新调一次模型并重出所有图，你在这里改过的内容会被覆盖。",
+  })) return;
+  try {
+    await api(`/api/ai/drafts/${AI_DRAFT_ID}/regenerate`, { method: "POST" });
+    $("ai-d-msg").textContent = "已排进后台，一两分钟后回来看。";
+    toast("已重新排队 ✓", "ok");
+    openAiDraft(AI_DRAFT_ID, true);
+    refreshAiDrafts();
+  } catch (e) { toast("失败：" + e.message, "err", 8000); }
+}
+
+async function aiDraftToPublish() {
+  const btn = evtBtn();
+  const accounts = [...$("ai-draft-acc").options].filter(o => o.value)
+    .map(o => ({ value: o.value, label: o.textContent }));
+  if (!accounts.length) { toast("先在账号页登录一个可发布的账号", "err"); return; }
+  const picked = await uiSelect({
+    title: "用哪个号发",
+    hint: "创建后进入发布队列，没设定时的话很快就会发出去。要挑时间的话，先去「发布」页给这条任务设一个发布时间。",
+    options: accounts, value: $("ai-draft-acc").value || accounts[0].value,
+  });
+  if (!picked) return;
+  await withBusy(btn, "创建中", async () => {
+    try {
+      const out = await api(`/api/ai/drafts/${AI_DRAFT_ID}/to-publish`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ account_id: Number(picked) }),
+      });
+      $("ai-d-msg").textContent = `已创建发布任务 #${out.publish.id}`;
+      toast("已转成发布任务 ✓ 去「发布」页看", "ok", 6000);
+      openAiDraft(AI_DRAFT_ID, true);
+      refreshAiDrafts();
+      if (typeof refreshPublish === "function") refreshPublish();
+    } catch (e) { $("ai-d-msg").textContent = "失败：" + e.message; toast("失败：" + e.message, "err", 9000); }
+  });
+}
+
+// ── 人设档案 ──
+async function openAiBrandModal(id) {
+  const cat = await aiCatalog().catch(() => null);
+  if (!cat) { toast("读不到模板清单", "err"); return; }
+  AI_BRAND_ID = Number(id) || null;
+  const b = AI_BRANDS.find(x => x.id === AI_BRAND_ID) || {};
+  $("ai-brand-title").textContent = AI_BRAND_ID ? "编辑人设档案" : "新建人设档案";
+  $("ai-b-name").value = b.name || "";
+  $("ai-b-mark").value = b.mark || "";
+  $("ai-b-date").value = b.date_label || "";
+  $("ai-b-footer").value = b.footer_note || "";
+  $("ai-b-doc").value = b.doc || "";
+  $("ai-b-pname").value = b.product_name || "";
+  $("ai-b-pline").value = b.product_line || "";
+  $("ai-b-cta").value = b.cta_line || "";
+  $("ai-b-tags").value = b.tags_strategy || "";
+  $("ai-b-banned").value = b.banned_words || "";
+  $("ai-b-cmin").value = b.cards_min || 4;
+  $("ai-b-cmax").value = b.cards_max || 7;
+  $("ai-b-theme").innerHTML = '<option value="">（不选，用默认取向）</option>' +
+    cat.themes.map(t => `<option value="${t.name}">${esc(t.label)} —— ${esc(t.one_liner)}</option>`).join("");
+  $("ai-b-theme").value = b.theme || "";
+  syncSelect($("ai-b-theme"));
+  const picked = new Set(b.allowed_templates || []);
+  $("ai-b-templates").innerHTML = cat.templates.map(t =>
+    `<label class="row" style="gap:6px;align-items:center;flex:0 0 auto" title="${esc(t.summary)}">
+       <input type="checkbox" class="ai-b-tpl" value="${esc(t.name)}"${picked.has(t.name) ? " checked" : ""}>
+       <span>${esc(t.name)}</span></label>`).join("");
+  $("ai-b-del").style.display = AI_BRAND_ID ? "" : "none";
+  $("ai-b-msg").textContent = "";
+  const modal = $("ai-brand-modal");
+  modal.style.display = "flex";
+  modalOpened(modal);
+}
+
+function hideAiBrandModal() {
+  const modal = $("ai-brand-modal");
+  modal.style.display = "none";
+  modalClosed(modal);
+}
+
+async function saveAiBrand() {
+  const btn = evtBtn();
+  const body = {
+    name: $("ai-b-name").value.trim(),
+    platform: pfHasPublish(PLATFORM) ? PLATFORM : "xhs",
+    mark: $("ai-b-mark").value.trim(),
+    date_label: $("ai-b-date").value.trim(),
+    footer_note: $("ai-b-footer").value.trim(),
+    doc: $("ai-b-doc").value,
+    theme: $("ai-b-theme").value,
+    product_name: $("ai-b-pname").value.trim(),
+    product_line: $("ai-b-pline").value.trim(),
+    cta_line: $("ai-b-cta").value.trim(),
+    tags_strategy: $("ai-b-tags").value.trim(),
+    banned_words: $("ai-b-banned").value.trim(),
+    cards_min: Number($("ai-b-cmin").value) || 4,
+    cards_max: Number($("ai-b-cmax").value) || 7,
+    allowed_templates: [...document.querySelectorAll(".ai-b-tpl:checked")].map(el => el.value),
+  };
+  if (!body.name) { $("ai-b-msg").textContent = "先给这个人设起个名字"; return; }
+  await withBusy(btn, "保存中", async () => {
+    try {
+      const saved = await api(AI_BRAND_ID ? `/api/ai/brands/${AI_BRAND_ID}` : "/api/ai/brands", {
+        method: AI_BRAND_ID ? "PUT" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      await refreshAiBrands();
+      $("ai-brand-pick").value = String(saved.id);
+      syncSelect($("ai-brand-pick"));
+      hideAiBrandModal();
+      toast("人设已保存 ✓", "ok");
+    } catch (e) { $("ai-b-msg").textContent = "失败：" + e.message; toast("保存失败：" + e.message, "err"); }
+  });
+}
+
+async function deleteAiBrand() {
+  if (!AI_BRAND_ID) return;
+  if (!await uiConfirm({
+    title: "删除人设", okText: "删除", danger: true,
+    message: "已经生成的草稿会保留，只是不再关联这个人设。",
+  })) return;
+  try {
+    await api(`/api/ai/brands/${AI_BRAND_ID}`, { method: "DELETE" });
+    hideAiBrandModal();
+    await refreshAiBrands();
+    refreshAiDrafts();
+    toast("已删除", "ok");
+  } catch (e) { toast("删除失败：" + e.message, "err"); }
+}
+
+// ── 设置页:AI 内容创作通道 ──
+function onAiContentProvider() {
+  const anthropic = $("aic-provider") && $("aic-provider").value === "anthropic";
+  if ($("aic-provider-help")) {
+    $("aic-provider-help").textContent = anthropic
+      ? "官方 SDK 直连，需要 pip install anthropic；不要拿兼容接口连 Claude"
+      : "兼容 /chat/completions 的任何服务";
+  }
+  if ($("aic-base")) $("aic-base").placeholder = anthropic
+    ? "留空 = https://api.anthropic.com" : "留空 = 用上面那组的地址";
+  if ($("aic-model")) $("aic-model").placeholder = anthropic
+    ? "留空 = claude-opus-5" : "留空 = 用上面那组的模型";
+}
+
+function fillAiContentSettings(s) {
+  if (!$("aic-provider")) return;
+  $("aic-provider").value = s.ai_content_provider || "openai";
+  syncSelect($("aic-provider"));
+  $("aic-base").value = s.ai_content_base_url || "";
+  $("aic-model").value = s.ai_content_model || "";
+  $("aic-maxtok").value = s.ai_content_max_tokens || "16000";
+  $("aic-key").placeholder = s.ai_content_api_key_set
+    ? "已保存（留空=不修改）" : "留空 = 用上面那组的 Key";
+  onAiContentProvider();
+  const eff = s.ai_content_effective || {};
+  $("aic-effective").innerHTML = eff.ready
+    ? `<svg aria-hidden="true"><use href="#i-check"/></svg><span>实际会用：<b>${esc(eff.model)}</b>（${esc(eff.provider)} · ${esc(eff.base_url || "官方地址")}）</span>`
+    : `<svg aria-hidden="true"><use href="#i-info"/></svg><span>还不能用：${esc(eff.why || "没配置")}</span>`;
+}
+
+async function saveAiContentSettings() {
+  const btn = evtBtn();
+  const body = {
+    ai_content_provider: $("aic-provider").value,
+    ai_content_base_url: $("aic-base").value.trim(),
+    ai_content_model: $("aic-model").value.trim(),
+    ai_content_max_tokens: $("aic-maxtok").value.trim(),
+  };
+  const key = $("aic-key").value.trim();
+  if (key) body.ai_content_api_key = key;
+  await withBusy(btn, "保存中", async () => {
+    try {
+      const s = await api("/api/settings", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      $("aic-key").value = "";
+      fillAiContentSettings(s);
+      $("aic-msg").textContent = "已保存 ✓";
+      toast("创作通道已保存", "ok");
+      aiChannelNote();
+    } catch (e) { $("aic-msg").textContent = "失败：" + e.message; toast("保存失败：" + e.message, "err"); }
+  });
+}
+
+async function testAiContent() {
+  const btn = evtBtn();
+  const body = {
+    provider: $("aic-provider").value,
+    base_url: $("aic-base").value.trim(),
+    model: $("aic-model").value.trim(),
+  };
+  const key = $("aic-key").value.trim();
+  if (key) body.api_key = key;
+  $("aic-msg").textContent = "测试中…";
+  await withBusy(btn, "测试中", async () => {
+    try {
+      const r = await api("/api/settings/ai-content-test", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (r.ok) {
+        $("aic-msg").innerHTML = `连通正常 ✓ <b>${esc(r.model || "")}</b>：${esc(r.sample || "")}`;
+        toast("创作通道连通正常 ✓", "ok", 6000);
+      } else {
+        $("aic-msg").textContent = "连通失败：" + (r.error || "");
+        toast("连通失败：" + (r.error || ""), "err", 9000);
+      }
+    } catch (e) { $("aic-msg").textContent = "失败：" + e.message; toast("测试失败：" + e.message, "err"); }
+  });
 }
 
 // initial skeletons while data loads
@@ -7020,9 +7507,10 @@ $("danmaku-table").innerHTML = skeleton(6);
 $("collection-job-table").innerHTML = collectionTaskSkeleton(3);
 $("collection-content-list").innerHTML = collectionResultSkeleton(4);
 $("queue-table").innerHTML = skeleton(7);
+if ($("ai-draft-table")) $("ai-draft-table").innerHTML = skeleton(7);
 
 // restore last-selected section (default: 总览);旧版四个独立页已并入「账号管理」
-const VALID_TABS = ["overview", "accounts", "risk-control", "queue", "collections", "monitors", "comments", "danmaku", "hub", "publish", "autocomment", "share-download", "notifications", "settings"];
+const VALID_TABS = ["overview", "accounts", "risk-control", "queue", "collections", "monitors", "comments", "danmaku", "hub", "publish", "ai-studio", "autocomment", "share-download", "notifications", "settings"];
 const LEGACY_HUB_TABS = ["myworks", "following", "fans", "dm"];
 switchTab((() => {
   try {

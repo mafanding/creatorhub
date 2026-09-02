@@ -1864,6 +1864,7 @@
     <div class="nav-sep">工具</div>
     <button class="navitem" data-tab="queue" onclick="switchTab('queue', true)"><svg><use href="#i-list"/></svg><span class="nav-label">任务队列</span><span class="nav-badge" id="tb-queue">0</span></button>
     <button class="navitem pub-only" data-tab="publish" onclick="switchTab('publish', true)"><svg><use href="#i-send"/></svg><span class="nav-label">发布</span><span class="nav-badge" id="tb-pub">0</span></button>
+    <button class="navitem pub-only" data-tab="ai-studio" onclick="switchTab('ai-studio', true)"><svg><use href="#i-bolt"/></svg><span class="nav-label">AI 创作</span><span class="nav-badge" id="tb-ai">0</span></button>
     <button class="navitem notsh-only" data-tab="autocomment" onclick="switchTab('autocomment', true)"><svg><use href="#i-msg"/></svg><span class="nav-label">自动评论</span><span class="nav-badge" id="tb-ac">0</span></button>
     <button class="navitem" data-tab="share-download" onclick="switchTab('share-download', true)"><svg><use href="#i-download"/></svg><span class="nav-label">链接下载</span></button>
     <button class="navitem" data-tab="notifications" onclick="switchTab('notifications', true)"><svg><use href="#i-bell"/></svg><span class="nav-label">通知</span></button>
@@ -2589,6 +2590,115 @@
       </div>
     </div>
   </div>
+
+  <!-- 大模型 API(AI 创作:写正文 + 生成配图卡片)-->
+  <div class="card">
+    <div class="card-head">
+      <span class="card-ic"><svg><use href="#i-image"/></svg></span>
+      <h2>AI 内容创作 <span class="sub">写笔记正文与配图卡片用的通道</span></h2>
+    </div>
+    <div class="stack">
+      <div class="form-note">
+        <svg aria-hidden="true"><use href="#i-info"/></svg>
+        <span>和上面那组<b>故意分开</b>：写一篇笔记值得用贵模型，写一条评论不值得。这里每一项留空都会回落到上面那组，所以只有一个网关时不用重复填。</span>
+      </div>
+      <div class="form-grid">
+        <div class="form-field">
+          <label for="aic-provider">通道类型</label>
+          <select id="aic-provider" onchange="onAiContentProvider()">
+            <option value="openai">OpenAI 兼容接口</option>
+            <option value="anthropic">Anthropic 直连</option>
+          </select>
+          <div class="field-help" id="aic-provider-help">兼容 /chat/completions 的任何服务</div>
+        </div>
+        <div class="form-field">
+          <label for="aic-model">模型名称</label>
+          <input id="aic-model" autocomplete="off" placeholder="留空 = 用上面那组的模型">
+        </div>
+        <div class="form-field">
+          <label for="aic-base">接口地址</label>
+          <input id="aic-base" type="url" inputmode="url" placeholder="留空 = 用上面那组的地址">
+        </div>
+        <div class="form-field">
+          <label for="aic-key">API Key</label>
+          <div class="input-affix">
+            <input id="aic-key" type="password" autocomplete="new-password" placeholder="留空 = 用上面那组的 Key">
+            <button class="input-action" type="button" onclick="toggleSecretInput('aic-key',this)" aria-label="显示 API Key" aria-pressed="false" title="显示或隐藏 API Key"><svg><use href="#i-eye"/></svg></button>
+          </div>
+        </div>
+        <div class="form-field">
+          <label for="aic-maxtok">最大输出长度</label>
+          <input id="aic-maxtok" type="number" min="1000" max="128000" step="1000" placeholder="16000">
+          <div class="field-help">一篇笔记 + 六张卡的 JSON 大约 6-12k，给小了会被截断成半句话</div>
+        </div>
+      </div>
+      <div class="form-note" id="aic-effective">—</div>
+      <div class="form-actions">
+        <span class="status-text" id="aic-msg" role="status" aria-live="polite"></span>
+        <button class="ghost" onclick="testAiContent()"><svg><use href="#i-bolt"/></svg>测试连通性</button>
+        <button onclick="saveAiContentSettings()"><svg><use href="#i-check"/></svg>保存创作通道</button>
+      </div>
+    </div>
+  </div>
+  </section>
+
+  <section data-panel="ai-studio" class="pub-only">
+    <!-- 生成一篇 -->
+    <div class="card">
+      <div class="card-head">
+        <span class="card-ic"><svg><use href="#i-bolt"/></svg></span>
+        <h2>AI 创作 <span class="sub">提示词 + API 生成正文与配图卡片，人工确认后再转发布</span></h2>
+      </div>
+      <div class="stack">
+        <div class="form-grid">
+          <div class="form-field">
+            <label for="ai-brand-pick">人设档案</label>
+            <select id="ai-brand-pick"></select>
+            <div class="field-help">决定口吻、视觉风格、卡片张数与可用模板</div>
+          </div>
+          <div class="form-field">
+            <label for="ai-draft-acc">发布账号（可选）</label>
+            <select id="ai-draft-acc"></select>
+            <div class="field-help">转成发布任务时用；这里不选，之后也能选</div>
+          </div>
+        </div>
+        <div class="form-field">
+          <label for="ai-direction">今天写什么</label>
+          <textarea id="ai-direction" rows="2" placeholder="一句话方向，例如「讲讲多张卡参加同一活动怎么记不乱」。留空就让它按人设自己定题"></textarea>
+        </div>
+        <div class="form-field">
+          <label for="ai-facts">真实素材（正文里唯一可信的数字来源）</label>
+          <textarea id="ai-facts" rows="4" placeholder="把今天的真实数据、活动细则、你自己的经历贴进来…"></textarea>
+          <div class="field-help">不填就不会出现任何具体金额/比例/截止日 —— 编一个数字的代价是读者真花的钱</div>
+        </div>
+        <div class="form-note">
+          <svg aria-hidden="true"><use href="#i-info"/></svg>
+          <span id="ai-channel-note">正文与卡片数据由大模型生成，配图由本地模板渲染成 1080×1440 PNG（不是文生图）。通道在「设置 → AI 内容创作」里配。</span>
+        </div>
+        <div class="form-actions">
+          <span class="status-text" id="ai-studio-msg" role="status" aria-live="polite"></span>
+          <button class="ghost" onclick="openAiBrandModal(null)"><svg><use href="#i-plus"/></svg>新建人设</button>
+          <button class="ghost" onclick="openAiBrandModal($('ai-brand-pick').value)"><svg><use href="#i-settings"/></svg>编辑人设</button>
+          <button onclick="startAiDraft()"><svg><use href="#i-bolt"/></svg>开始生成</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 草稿列表 -->
+    <div class="card">
+      <div class="card-head">
+        <span class="card-ic"><svg><use href="#i-image"/></svg></span>
+        <h2>创作草稿 <span class="sub">生成完先摆在这儿，看过、改过再发</span></h2>
+      </div>
+      <div class="table-wrap">
+        <table aria-label="AI 创作草稿">
+          <thead><tr>
+            <th>标题</th><th>人设</th><th>状态</th><th>图</th><th>通道</th><th>时间</th><th>操作</th>
+          </tr></thead>
+          <tbody id="ai-draft-table"></tbody>
+        </table>
+      </div>
+    </div>
   </section>
 
   <section data-panel="publish">
@@ -3370,6 +3480,101 @@
     <h2 id="risk-event-title">风险事件</h2>
     <div class="mut" id="risk-event-subtitle" style="font-size:12px;margin:-8px 0 12px">最近事件</div>
     <div class="risk-event-list" id="risk-event-list"></div>
+  </div>
+</div>
+
+<!-- 人设档案(弹窗) -->
+<div id="ai-brand-modal" class="pv-overlay" style="display:none" role="dialog" aria-modal="true"
+     aria-labelledby="ai-brand-title" onclick="if(event.target.id==='ai-brand-modal')hideAiBrandModal()">
+  <div class="rp-box" style="width:min(94vw,760px);max-height:88vh;display:flex;flex-direction:column">
+    <button class="pv-close" onclick="hideAiBrandModal()" aria-label="关闭"><svg><use href="#i-x"/></svg></button>
+    <h2 id="ai-brand-title">人设档案</h2>
+    <div class="mut" style="font-size:12px;margin:-8px 0 12px">每天的题目和口吻都从这份档案长出来。换方向改这里，不改代码。</div>
+    <div class="stack" style="overflow:auto;flex:1;min-height:160px;padding-right:4px">
+      <div class="form-grid">
+        <div class="form-field"><label for="ai-b-name">名称</label><input id="ai-b-name" placeholder="这个号叫什么"></div>
+        <div class="form-field"><label for="ai-b-theme">视觉风格</label><select id="ai-b-theme"></select><div class="field-help" id="ai-b-theme-help">决定卡片的配色与字族</div></div>
+        <div class="form-field"><label for="ai-b-mark">卡片页眉标记</label><input id="ai-b-mark" placeholder="留空用名称"></div>
+        <div class="form-field"><label for="ai-b-date">卡片页眉右侧</label><input id="ai-b-date" placeholder="如 2026 / 09"></div>
+        <div class="form-field"><label for="ai-b-footer">卡片页脚</label><input id="ai-b-footer" placeholder="如 小账本 · 活动追踪"></div>
+        <div class="form-field"><label for="ai-b-cards">每篇卡片张数</label>
+          <div class="row" style="gap:8px;align-items:center">
+            <input id="ai-b-cmin" type="number" min="1" max="18" style="width:76px">
+            <span class="mut">—</span>
+            <input id="ai-b-cmax" type="number" min="1" max="18" style="width:76px">
+          </div>
+          <div class="field-help">按范围随机取，每篇同样张数是很强的机器特征</div>
+        </div>
+      </div>
+      <div class="form-field">
+        <label for="ai-b-doc">人设 / 口吻 / 受众（Markdown）</label>
+        <textarea id="ai-b-doc" rows="8" placeholder="这个号是干什么的、对谁讲、什么口气、要让人记住什么…"></textarea>
+        <div class="field-help">写得越具体，产出越不像通用 AI 文案</div>
+      </div>
+      <div class="form-grid">
+        <div class="form-field"><label for="ai-b-pname">产品 / 服务名</label><input id="ai-b-pname"></div>
+        <div class="form-field"><label for="ai-b-pline">产品一句话</label><input id="ai-b-pline" placeholder="它解决什么问题"></div>
+        <div class="form-field"><label for="ai-b-cta">引导语口吻</label><input id="ai-b-cta" placeholder="如 在主页简介里，网页打开就能用"></div>
+        <div class="form-field"><label for="ai-b-tags">标签策略</label><input id="ai-b-tags" placeholder="如 2 个大词 + 3 个中词 + 1 个长尾"></div>
+      </div>
+      <div class="form-field">
+        <label for="ai-b-banned">不能公开的字串</label>
+        <textarea id="ai-b-banned" rows="2" placeholder="真实店名、单号、门牌…逗号或换行分隔"></textarea>
+        <div class="field-help">通用风险词拦的是有模式的东西；这些没有模式，只能按号列</div>
+      </div>
+      <div class="form-field">
+        <label>可用卡片模板</label>
+        <div id="ai-b-templates" class="row" style="flex-wrap:wrap;gap:10px"></div>
+        <div class="field-help">一个都不勾 = 全部可用</div>
+      </div>
+    </div>
+    <div class="row" style="justify-content:flex-end;gap:8px;margin-top:12px">
+      <span class="mut" id="ai-b-msg" style="margin-right:auto;font-size:12px"></span>
+      <button class="ghost danger" id="ai-b-del" onclick="deleteAiBrand()" style="flex:0 0 auto"><svg><use href="#i-trash"/></svg>删除</button>
+      <button onclick="saveAiBrand()" style="flex:0 0 auto"><svg><use href="#i-check"/></svg>保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 草稿详情(弹窗) -->
+<div id="ai-draft-modal" class="pv-overlay" style="display:none" role="dialog" aria-modal="true"
+     aria-labelledby="ai-d-title" onclick="if(event.target.id==='ai-draft-modal')hideAiDraftModal()">
+  <div class="rp-box" style="width:min(96vw,980px);max-height:90vh;display:flex;flex-direction:column">
+    <button class="pv-close" onclick="hideAiDraftModal()" aria-label="关闭"><svg><use href="#i-x"/></svg></button>
+    <h2 id="ai-d-title">创作草稿</h2>
+    <div class="mut" id="ai-d-meta" style="font-size:12px;margin:-8px 0 12px">—</div>
+    <div class="stack" style="overflow:auto;flex:1;min-height:180px;padding-right:4px">
+      <div id="ai-d-problems"></div>
+      <div id="ai-d-images" class="row" style="gap:10px;overflow-x:auto;padding-bottom:6px;align-items:flex-start;min-height:220px"></div>
+      <div class="form-field">
+        <label for="ai-d-titlein">标题 <span class="mut" id="ai-d-titlew"></span></label>
+        <input id="ai-d-titlein" maxlength="20" oninput="aiDraftTitleWidth()">
+      </div>
+      <div class="form-field">
+        <label for="ai-d-content">正文 <span class="mut" id="ai-d-len"></span></label>
+        <textarea id="ai-d-content" rows="10" oninput="aiDraftLen()"></textarea>
+      </div>
+      <div class="form-field">
+        <label for="ai-d-tags">话题标签</label>
+        <input id="ai-d-tags" placeholder="逗号分隔，不要带 #">
+      </div>
+      <div class="form-field">
+        <label for="ai-d-cards">卡片数据（JSON）</label>
+        <textarea id="ai-d-cards" rows="8" spellcheck="false" style="font-family:var(--mono);font-size:12px"></textarea>
+        <div class="field-help">改完点「重新渲染」才会重出图</div>
+      </div>
+      <div class="form-field" id="ai-d-notes-wrap">
+        <label>它自己的备注</label>
+        <div class="mut" id="ai-d-notes" style="font-size:12px"></div>
+      </div>
+    </div>
+    <div class="row" style="justify-content:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap">
+      <span class="mut" id="ai-d-msg" style="margin-right:auto;font-size:12px"></span>
+      <button class="ghost" onclick="regenerateAiDraft()" style="flex:0 0 auto"><svg><use href="#i-bolt"/></svg>重新生成</button>
+      <button class="ghost" onclick="saveAiDraft()" style="flex:0 0 auto"><svg><use href="#i-check"/></svg>保存修改</button>
+      <button class="ghost" onclick="rerenderAiDraft()" style="flex:0 0 auto"><svg><use href="#i-image"/></svg>重新渲染</button>
+      <button onclick="aiDraftToPublish()" style="flex:0 0 auto"><svg><use href="#i-send"/></svg>转为发布任务</button>
+    </div>
   </div>
 </div>
 

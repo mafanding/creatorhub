@@ -1,0 +1,23 @@
+# 渲染卡片时可选的视觉风格。brand.yaml 里写 visual.theme: <name>。
+# 项目自己的 templates/_theme.css 优先级更高（手写覆盖，改完立刻生效）。
+themes:
+- name: ledger
+  label: 账本
+  one_liner: 奶油纸 + 印章红 + 衬线标题，凭条/对账感
+  good_for: 记账、对账、长期跟踪。这是 _base.css 的默认取向
+- name: receipt
+  label: 票据
+  one_liner: 纯白 + 打印机等宽 + 虚线撕口 + 单枚红戳
+  good_for: 交易、验货、价目 —— 需要「实物在手」的信任感
+- name: kiosk
+  label: 街头海报
+  one_liner: 近黑底 + 酸性黄绿 + 压缩黑体 + 魏碑标题
+  good_for: 折扣、限时、清货 —— 需要紧迫感
+- name: notebook
+  label: 手记
+  one_liner: 横格纸 + 翩翩体手写 + 蓝黑墨水 + 马克笔高亮
+  good_for: 第一人称经验、踩坑记录、私人笔记
+- name: clinical
+  label: 制表
+  one_liner: 冷灰蓝 + 细发丝线 + 大量留白 + 全等宽数字
+  good_for: 参数对比、评测、数据结论

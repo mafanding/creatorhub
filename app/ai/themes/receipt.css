@@ -1,0 +1,50 @@
+/* 票据 —— 热敏小票 / 价签。
+ *
+ * 取向：这个号在卖实物，读者第一个疑问是「东西真在你手上吗」。
+ * 打印机等宽 + 撕口 + 一枚红戳，比任何插画都更像「刚从柜台拿到的凭据」。
+ * 全篇只有一个彩色（戳记红），其余纯黑白 —— 小红书信息流里几乎没人这么干。
+ */
+:root {
+  --paper: #FFFFFF; --paper-2: #FAFAF8;
+  --ink: #0B0B0B; --ink-2: #2B2B2B; --muted: #7A7A78;
+  --rule: #0B0B0B; --hairline: #C9C9C4;
+
+  --accent: #C8102E;  --accent-bg: #FBE9EC;   /* 只用在戳记和当日主角上 */
+  --gain: #0B0B0B;    --gain-bg: #F0F0EC;     /* 到手金额也走黑 —— 票据不用绿色 */
+  --warn: #8A5A00;    --warn-bg: #F7F0DF;
+
+  --ink-dark: #0B0B0B; --paper-dark: #FFFFFF; --on-accent: #FFFFFF;
+
+  --sans: "Songti SC", "Hiragino Sans GB", "PingFang SC", serif;
+  --mono: "Courier New", "SF Mono", Menlo, "PingFang SC", monospace;
+}
+
+/* 撕口：上下各一排半圆缺口 */
+body::before, body::after {
+  content: ""; position: absolute; left: 0; right: 0; height: 14px; z-index: 3;
+  background: radial-gradient(circle at 10px 0, transparent 9px, var(--paper) 9px) 0 0/20px 14px repeat-x;
+}
+body::before { top: 0; }
+body::after  { bottom: 0; transform: rotate(180deg); }
+
+/* 票据没有圆角，分隔线一律虚线 */
+.card, .box, .row, .item, .tag, .chip { border-radius: 0 !important; }
+hr, .rule, .sep { border: 0; border-top: 2px dashed var(--rule); }
+
+/* 小字全大写拉开 —— 打印机的味道 */
+.micro, .kicker, .label { font-family: var(--mono); letter-spacing: 0.18em; }
+.num { letter-spacing: 0.02em; }
+
+/* 票据的「深色」封面反其道而行：**保持纯白**，只把红戳放大。
+ * 一张全白的封面在小红书信息流里比深色更反常 —— 那儿深色封面已经很多了。 */
+:root {
+  --d-bg: #FFFFFF; --d-bg-2: #F4F4F0;
+  --d-ink: #0B0B0B; --d-ink-2: #2B2B2B; --d-muted: #7A7A78;
+  --d-rule: #0B0B0B; --d-hairline: #C9C9C4;
+  --d-accent: #C8102E; --d-accent-bg: #FBE9EC;
+  --d-gain: #0B0B0B; --d-gain-bg: #F0F0EC;
+  --d-warn: #8A5A00; --d-warn-bg: #F7F0DF;
+  --d-on-accent: #FFFFFF;
+}
+/* 封面上的撕口要更狠一点 */
+.canvas.dark { border-top: 3px solid var(--d-rule); border-bottom: 3px solid var(--d-rule); }

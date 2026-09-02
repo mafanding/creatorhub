@@ -677,3 +677,62 @@ class ShareDownloadRecord(SQLModel, table=True):
     metadata_json: str = "{}"
     error: str = ""
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+
+class AiBrand(SQLModel, table=True):
+    """AI 创作的人设档案 —— 每一篇的题目和口吻都从这里长出来。
+
+    这是「用提示词生成内容」里**提示词的那一半**:换方向改这份档案,不改代码。
+    `doc` 是散文(这个号是干什么的、对谁讲、什么口气、要让人记住什么),
+    其余字段是机器读的 —— 渲染卡片时会拼成模板里那个 `brand` 字典。
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = ""                     # 显示名
+    platform: str = Field(default="xhs", index=True)
+    mark: str = ""                     # 卡片页眉左侧的品牌标记
+    date_label: str = ""               # 卡片页眉右侧默认文字,如「2026 / 09」
+    footer_note: str = ""              # 卡片页脚左侧
+    doc: str = ""                      # Markdown:人设 / 口吻 / 受众 / 记忆点
+    theme: str = ""                    # 视觉风格名,见 app/ai/themes
+    product_name: str = ""
+    product_line: str = ""             # 产品一句话介绍
+    cta_line: str = ""                 # 引导语口吻(绝不进正文的外链只放主页)
+    tags_strategy: str = ""            # 标签配比策略
+    banned_words: str = ""             # 这个号自己那串不能公开的字串,逗号/换行分隔
+    cards_min: int = 4
+    cards_max: int = 7
+    allowed_templates: str = ""        # JSON 数组;留空 = 全部模板都可用
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class AiDraft(SQLModel, table=True):
+    """一次 AI 创作的产出:正文 + 一组渲染好的卡片图。
+
+    状态本身就是任务状态(pending → generating → rendering → ready | failed),
+    存在库里而不是内存里 —— 生成一篇要几十秒到几分钟,页面刷新、服务重启都
+    不该让人丢掉进度。`images_json` 里是本地 PNG 的绝对路径,发布任务直接引用,
+    所以那个目录不能是临时目录。
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    brand_id: Optional[int] = Field(default=None, index=True)
+    account_id: Optional[int] = None   # 打算用哪个号发(可空,转发布时再选也行)
+    platform: str = Field(default="xhs", index=True)
+    direction: str = ""                # 人给的一句话方向
+    facts: str = ""                    # 人贴进来的真实素材(唯一可信的数字来源)
+    status: str = Field(default="pending", index=True)
+    title: str = ""
+    content: str = ""
+    tags_json: str = "[]"
+    cards_json: str = "[]"
+    images_json: str = "[]"            # 渲染出来的 PNG 绝对路径
+    notes: str = ""                    # 模型自己记的一句:为什么这么写、风险在哪
+    problems_json: str = "[]"          # 预检没过的那些问题(ready 时通常为空)
+    error: str = ""
+    model: str = ""                    # 实际用的通道:provider:model
+    attempts: int = 0
+    usage_json: str = "{}"
+    publish_task_id: Optional[int] = None   # 转成发布任务后回填
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    finished_at: Optional[datetime] = None

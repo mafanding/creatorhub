@@ -1,0 +1,44 @@
+/* 街头海报 —— 近黑底 + 酸性黄绿。
+ *
+ * 取向：折扣和限时。深色底在小红书信息流里天然跳出来（那儿全是浅色马卡龙），
+ * 而酸性黄绿是「便宜、快、别犹豫」的颜色。标题用魏碑：笔画有刀锋，
+ * 印刷体的克制感全没了 —— 这正是清货海报要的。
+ */
+:root {
+  --paper: #101014; --paper-2: #1A1A20;
+  --ink: #F4F2EC; --ink-2: #C8C6BE; --muted: #8A8880;
+  --rule: #33333C; --hairline: #26262E;
+
+  --accent: #DFFF33;  --accent-bg: #23260A;   /* 酸性黄绿 */
+  --gain: #3DE08F;    --gain-bg: #0C2418;
+  --warn: #FFB020;    --warn-bg: #2A1D06;
+
+  --ink-dark: #F4F2EC; --paper-dark: #1A1A20;
+  --on-accent: #101014;   /* 黄绿实底上必须用黑字 —— 白字在这个亮度上看不见 */
+
+  --sans: "Avenir Next Condensed", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  --mono: "Avenir Next", "SF Mono", Menlo, "PingFang SC", monospace;
+}
+
+/* 标题走魏碑，正文留黑体 —— 全篇魏碑会累 */
+.hero, .h1 { font-family: "Weibei SC", "PingFang SC", sans-serif; letter-spacing: 0; }
+
+/* 硬边、粗线 */
+.card, .box, .row, .item, .tag, .chip { border-radius: 0 !important; }
+.bar, .accent-bar { background: var(--accent); }
+hr, .rule, .sep { border: 0; border-top: 4px solid var(--accent); }
+
+/* 拉丁文和数字全大写 —— 海报腔 */
+.kicker, .label, .micro { text-transform: uppercase; letter-spacing: 0.16em; }
+
+/* 街头海报本来就是深色的，所以「深色卡」改成**反相**：酸性黄绿实底压黑字。
+ * 这是整套里最响的一张，只用在封面上。 */
+:root {
+  --d-bg: #DFFF33; --d-bg-2: #CBEA22;
+  --d-ink: #101014; --d-ink-2: #26260E; --d-muted: #5A5F20;
+  --d-rule: #101014; --d-hairline: #A9C41C;
+  --d-accent: #101014; --d-accent-bg: #F2FF9B;
+  --d-gain: #0B5A38; --d-gain-bg: #EAFFC9;
+  --d-warn: #6B3F00; --d-warn-bg: #FFF3C4;
+  --d-on-accent: #DFFF33;
+}

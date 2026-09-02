@@ -1,0 +1,88 @@
+{#
+  所有卡片模板的骨架。模板只需要 override {% block body %}。
+
+  可用变量：
+    d      — 这张卡的 data（模板自定义 schema，见同名 .sample.json）
+    brand  — 人设档案(AiBrand)解析出来的机器可读字段
+    index  / total — 第几张 / 共几张
+#}
+<meta charset="utf-8">
+<style>
+{# 必须 | safe。自动转义会把 CSS 里的引号变成 &#34;，于是
+   font-family: "PingFang SC", … 整条声明失效，字体栈静默失灵 ——
+   卡片看着"正常"（Chromium 兜底字体），但一个字族设置都没生效过。
+   这两份 CSS 都是仓库里的文件，不是模型产出的内容；卡片数据仍然照常转义。 #}
+{{ base_css | safe }}
+{# 这个项目自己的视觉风格，覆盖上面的 :root。见 src/xhs_autonote/themes/ #}
+{{ theme_css | safe }}
+{% block style %}{% endblock %}
+</style>
+
+<div class="canvas {% block canvas_class %}{% endblock %}">
+  {% block header %}
+  <header class="hdr">
+    <span class="mark">{{ d.brand_mark | default(brand.mark, true) }}</span>
+    <span class="meta">{{ d.date_label | default(brand.default_date_label, true) }}</span>
+  </header>
+  {% endblock %}
+
+  <main class="body">
+    <div class="fit-scope stack grow">
+      {% block body %}{% endblock %}
+    </div>
+  </main>
+
+  {% block footer %}
+  <footer class="ftr">
+    <span>{{ d.footer_note | default(brand.footer_note, true) }}</span>
+    <span class="pager">{{ "%02d" | format(index) }} / {{ "%02d" | format(total) }}</span>
+  </footer>
+  {% endblock %}
+</div>
+
+<script>
+/* 文案由 AI 生成，长度不可控。渲染前做两件事：
+   1. [data-fit] 元素按二分法缩字号，直到装得下自己的盒子；
+   2. 正文区整体兜底缩放（Chromium 的 zoom 会真正重排，不是变形）。
+   两步都做完才置 window.__cardReady，截图前会等这个标记。 */
+(function () {
+  function fitOne(el) {
+    var box = el.getBoundingClientRect();
+    var maxH = parseFloat(el.dataset.fitH || 0) || el.clientHeight;
+    if (!maxH) return;
+    var base = parseFloat(getComputedStyle(el).fontSize);
+    var lo = base * (parseFloat(el.dataset.fitMin) || 0.55), hi = base;
+    if (el.scrollHeight <= maxH + 1) return;
+    for (var i = 0; i < 14; i++) {
+      var mid = (lo + hi) / 2;
+      el.style.fontSize = mid + 'px';
+      if (el.scrollHeight <= maxH + 1) { lo = mid; } else { hi = mid; }
+    }
+    el.style.fontSize = lo + 'px';
+  }
+
+  document.querySelectorAll('[data-fit]').forEach(fitOne);
+
+  /* 兜底缩放。曾经比的是 scope.getBoundingClientRect().height <= host.clientHeight，
+     而 .fit-scope 是 flex 子项、高度永远被容器锁死 —— 那个条件恒真，循环第一轮就
+     break，兜底其实从来没生效过（14 张卡实测 zoom 一次都没被设过）。
+     正确的判据是「内容比自己的盒子高」= scrollHeight > clientHeight。
+
+     TOL=8px：clientHeight 取整、行盒半行距这些亚像素噪声能到 2-3px，容差小了会让
+     本来正常的卡（outro 实测 +3px）平白缩掉 2.5%。只有真溢出（几十 px）才该触发。 */
+  var scope = document.querySelector('.fit-scope');
+  if (scope) {
+    var TOL = 8, z = 1;
+    for (var i = 0; i < 22 && scope.scrollHeight > scope.clientHeight + TOL; i++) {
+      z -= 0.025;
+      scope.style.zoom = z;
+    }
+  }
+
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(function () { window.__cardReady = true; });
+  } else {
+    window.__cardReady = true;
+  }
+})();
+</script>

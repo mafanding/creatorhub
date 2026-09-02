@@ -1,0 +1,88 @@
+{% extends "_layout.html.j2" %}
+{#
+  封面卡：决定点击率的那一张。一个钩子 + 一个数字 + 三条预告。
+
+  两件事这里要特别小心：
+
+  1. 除 title 外全是可选字段，而模板是 StrictUndefined 渲染的 —— 直接写 d.badge
+     在没给 badge 的草稿上会当场抛 UndefinedError，整条流水线断在 render。
+     所有可选字段一律先 `| default('', true)` 落成本地变量再判断，
+     和另外六张卡的写法保持一致。
+
+  2. 留白不许堆成一整块。原来 .cv-list 用 margin-top:auto 顶到底，示例数据
+     （2 行标题 + 3 条预告）在卡中间留下 325px 死白，而其余六张卡最大空档
+     都 ≤116px —— 封面是参考模板，反而是唯一违反「留白要平摊」这条的。
+     现在改成：先给一段封顶的空气，剩下的高度分到预告条的行距里（条目 flex:1 0 auto
+     且封顶），和 tips / list / detail 消化富余高度的做法一致。
+#}
+
+{% block canvas_class %}dark{% endblock %}
+
+{% block style %}
+.cv-hero { margin-top: 30px; max-height: 470px; }
+.cv-hero em { font-style: normal; color: var(--accent); }
+.cv-sub { margin-top: 30px; max-width: 800px; }
+
+/* 富余高度的第一段去处，封顶 140px：没有它，标题短的时候整块预告会被顶到最下面。
+   不给 highlights 时这里是唯一的弹性块，剩下的高度全落到卡片下半部 ——
+   徽章/眉标/标题保持贴着页眉那条线，像一张海报。
+   （试过让整块垂直居中，徽章会飘到卡片正中间，看着像渲染坏了，别再改回去。） */
+.cv-air { flex: 1 1 auto; min-height: 24px; max-height: 140px; }
+
+.cv-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding-top: 34px;
+  border-top: 1px solid var(--rule);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* 只涨不缩、且封顶：条目少时把留白摊进行距，多时回落到自然高度 */
+.cv-item {
+  flex: 1 0 auto;
+  max-height: 124px;
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  padding: 15px 0;
+}
+.cv-item + .cv-item { border-top: 1px solid var(--hairline); }
+.cv-dot { flex: 0 0 auto; width: 11px; height: 11px; margin-top: 20px; background: var(--accent); border-radius: 50%; }
+
+.cv-badge {
+  display: inline-block; margin-top: 6px; padding: 10px 22px;
+  background: var(--accent); color: var(--on-accent); font-size: var(--t-small);
+  font-weight: 600; letter-spacing: 0.06em;
+}
+{% endblock %}
+
+{% block body %}
+{# StrictUndefined：可选字段全部先落成安全默认值，缺键不许炸 #}
+{% set badge      = d.badge      | default('', true) %}
+{% set kicker     = d.kicker     | default('', true) %}
+{% set subtitle   = d.subtitle   | default('', true) %}
+{% set highlights = (d.highlights | default([], true))[:4] %}
+
+{% if badge %}<div><span class="cv-badge">{{ badge }}</span></div>{% endif %}
+{% if kicker %}<div class="kicker" style="margin-top:{{ 26 if badge else 0 }}px">{{ kicker }}</div>{% endif %}
+
+<h1 class="hero cv-hero" data-fit data-fit-h="470" data-fit-min="0.6">{{ d.title | default('', true) | rich }}</h1>
+
+{% if subtitle %}
+<p class="sub cv-sub clamp-3">{{ subtitle | rich }}</p>
+{% endif %}
+
+<div class="cv-air"></div>
+
+{% if highlights %}
+<div class="cv-list">
+  {% for h in highlights %}
+  <div class="cv-item">
+    <span class="cv-dot"></span>
+    <span class="h3 clamp-2 grow">{{ h | rich }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,166 @@
+{% extends "_layout.html.j2" %}
+{#
+  详解卡：一张卡把一个活动讲透。银行 → 活动名 → 参数表 → 参与步骤 → 踩坑提醒。
+
+  纵向预算：.body 的内容盒实测 1094px，所有区块加起来必须小于它。
+  _layout 的兜底 zoom 现在真的会生效了（判据修成了 scrollHeight > clientHeight，
+  之前那版恒假、从未触发过），但它是「最后一道防线」不是设计手段 ——
+  一旦触发，整张卡会被等比缩掉几个百分点，页眉页脚跟着一起变小，一眼能看出来。
+  所以这里照旧自己保证装得下：标题 data-fit 缩字号 + max-height 截断，
+  其余文字一律 clamp-N，4 步时步骤只给一行。
+
+  最坏情况实测（2 行标题 + 2 行 summary + 4 参数带 note + 3 个两行步骤 + 2 行提醒）
+  自然高度 1047px，余量 47px。注意「3 步 clamp-2」比「4 步 clamp-1」还高 38px，
+  改行高 / 内边距前先跑一遍最坏情况，别只看示例数据。
+
+  富余高度的分配交给 flex：参数表和步骤区先长高（行变高），剩下的才给 .dt-sep 留白，
+  这样条目少的时候是靠内容撑满，而不是几条大空隙。7 组极端数据实测 0 溢出、0 底部留白。
+#}
+
+{% block style %}
+.dt-wrap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+
+/* 富余高度的分配：先让参数表和步骤区长高（行变高，仍然是块），剩下的才给留白。
+   条目少的时候卡片靠内容撑满，而不是靠几条大空隙，避免「上挤下空」。
+   max-height 按行数 / 步数算，防止 2 个参数被拉成一整屏。 */
+.dt-sep { flex: 0.8 1 auto; min-height: 10px; max-height: 114px; }
+
+/* ── 抬头：银行 + 卡种 + 状态 ──────────────────────────── */
+.dt-org { display: flex; align-items: center; gap: 14px; flex: 0 0 auto; }
+.dt-bank {
+  flex: 0 0 auto;
+  padding: 5px 18px; background: var(--ink); color: var(--paper);
+  font-size: var(--t-small); font-weight: 700; line-height: 1.3;
+  letter-spacing: 0.04em; white-space: nowrap;
+}
+.dt-cardname {
+  font-size: var(--t-small); line-height: 1.3; color: var(--muted);
+  letter-spacing: 0.02em; min-width: 0;
+}
+.dt-status { margin-left: auto; flex: 0 0 auto; padding: 5px 16px; }
+
+/* ── 活动名 ────────────────────────────────────────────── */
+.dt-title { flex: 0 0 auto; margin-top: 22px; max-height: 126px; overflow: hidden; }
+.dt-title em { font-style: normal; color: var(--accent); }
+.dt-summary {
+  flex: 0 0 auto; margin-top: 14px;
+  font-size: var(--t-small); line-height: 1.5; color: var(--ink-2);
+}
+
+/* ── 参数表：账本式细线网格 ────────────────────────────── */
+.dt-params {
+  flex: 1.4 0 auto;
+  max-height: calc(var(--n-rows, 2) * 220px);
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 1.5px; background: var(--rule);
+  border: 1.5px solid var(--rule);
+}
+.dt-cell {
+  background: var(--paper-2);
+  padding: 10px 26px 12px;
+  min-height: 132px;
+  display: flex; flex-direction: column; justify-content: center;
+}
+/* 奇数个参数时最后一格横跨整行：改成横排，否则右半边会空一大片 */
+.dt-cell.dt-wide { grid-column: span 2; flex-direction: row; align-items: center; gap: 24px; }
+.dt-wide .dt-val { margin-top: 0; }
+.dt-wide .dt-note { margin-top: 0; margin-left: auto; padding-left: 20px; min-width: 0; }
+/* 注意：带 .clamp-N 的元素不能再设 display，否则会盖掉 -webkit-box，截断失效 */
+.dt-label { line-height: 1.25; }
+.dt-val { margin-top: 6px; line-height: 1.25; }
+.dt-note { margin-top: 4px; line-height: 1.25; }
+
+/* ── 小节标题 ──────────────────────────────────────────── */
+.dt-sec { flex: 0 0 auto; display: flex; align-items: center; gap: 16px; margin-bottom: 14px; }
+.dt-sec-t { font-size: var(--t-micro); line-height: 1.25; letter-spacing: 0.18em; color: var(--muted); white-space: nowrap; }
+.dt-sec-l { flex: 1 1 auto; height: 1px; background: var(--hairline); }
+
+/* ── 参与步骤 ──────────────────────────────────────────── */
+.dt-steps {
+  flex: 1.6 0 auto;
+  max-height: calc(46px + var(--n-steps, 3) * 116px);
+  display: flex; flex-direction: column;
+}
+.dt-step { flex: 1 0 auto; display: flex; align-items: center; gap: 20px; padding: 5px 0; }
+.dt-step + .dt-step { border-top: 1px solid var(--hairline); }
+.dt-step-t { font-size: var(--t-body); font-weight: 500; line-height: 1.4; color: var(--ink); }
+
+/* ── 踩坑提醒 ──────────────────────────────────────────────
+   形状来自 _base.css 的 .callout（tips 的小结、compare 的结论同一个类），
+   .on-warn 只换颜色不换形状。改造后纵向内边距 18/20 → 14/14，
+   这块比原来矮约 10px，是给高度预算多出来的余量，不是少了的。 */
+.dt-tip { flex: 0 0 auto; }
+.dt-tip-t { font-size: var(--t-small); line-height: 1.45; color: var(--ink-2); }
+{% endblock %}
+
+{% block body %}
+{# StrictUndefined：字典缺键会直接报错，可选字段先在这里落成安全默认值 #}
+{% set bank    = d.bank      | default('', true) %}
+{% set cardnm  = d.card_name | default('', true) %}
+{% set status  = d.status    | default('', true) %}
+{% set summary = d.summary   | default('', true) %}
+{% set params  = (d.params   | default([], true))[:4] %}
+{% set steps   = (d.steps    | default([], true))[:4] %}
+{% set tip     = d.tip       | default('', true) %}
+{# 参数表行数 / 步骤条数 → 决定这两块最多能长多高（见 style 里的 max-height） #}
+{% set n_rows = ((params | length) + 1) // 2 %}
+
+<div class="dt-wrap" style="--n-rows: {{ n_rows }}; --n-steps: {{ steps | length }}">
+
+  {% if bank or cardnm or status %}
+  <div class="dt-org">
+    {% if bank %}<span class="dt-bank">{{ bank }}</span>{% endif %}
+    {% if cardnm %}<span class="dt-cardname clamp-1">{{ cardnm }}</span>{% endif %}
+    {% if status %}<span class="chip on-accent dt-status">{{ status }}</span>{% endif %}
+  </div>
+  {% endif %}
+
+  <h1 class="h1 dt-title" data-fit data-fit-h="126" data-fit-min="0.62">{{ d.title | rich }}</h1>
+
+  {% if summary %}
+  <p class="sub dt-summary clamp-2">{{ summary }}</p>
+  {% endif %}
+
+  {% if params %}
+  <div class="dt-sep"></div>
+  <div class="dt-params">
+    {% for p in params %}
+    {% set tone = p.tone | default('', true) %}
+    <div class="dt-cell{{ ' dt-wide' if loop.last and params | length is odd else '' }}">
+      <span class="micro dt-label clamp-1">{{ p.label | default('', true) }}</span>
+      <span class="h3 num dt-val clamp-1 {{ tone if tone in ('accent', 'gain', 'warn') else '' }}">{{ p.value | default('—', true) }}</span>
+      {% if p.note | default('', true) %}
+      <span class="micro dt-note clamp-1">{{ p.note }}</span>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if steps %}
+  <div class="dt-sep"></div>
+  <div class="dt-steps">
+    <div class="dt-sec">
+      <span class="dt-sec-t">{{ d.steps_label | default('参与步骤', true) }}</span>
+      <span class="dt-sec-l"></span>
+    </div>
+    {% for s in steps %}
+    <div class="dt-step">
+      <span class="index-badge">{{ loop.index }}</span>
+      {# 4 步时只给一行，否则最坏情况会顶破画布 #}
+      <span class="dt-step-t grow {{ 'clamp-1' if steps | length > 3 else 'clamp-2' }}">{{ s }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if tip %}
+  <div class="dt-sep"></div>
+  <div class="callout on-warn dt-tip">
+    <span class="callout-k">{{ d.tip_label | default('踩坑提醒', true) }}</span>
+    <span class="callout-t dt-tip-t clamp-2">{{ tip }}</span>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}

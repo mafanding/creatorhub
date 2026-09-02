@@ -1,0 +1,21 @@
+/* 账本 —— _base.css 的默认取向，抽出来命名，好让别的项目明确「不选它」。 */
+:root {
+  --paper: #F7F5F0; --paper-2: #FFFFFF;
+  --ink: #14130F; --ink-2: #3A382F; --muted: #85806F;
+  --rule: #D9D3C4; --hairline: #E8E3D7;
+  --accent: #C8402C; --accent-bg: #F6E7E2;
+  --gain: #2F6B4F;  --gain-bg: #E4EDE6;
+  --warn: #A8721C;  --warn-bg: #F5EBD8;
+  --ink-dark: #14130F; --paper-dark: #F2EFE7; --on-accent: #FFFFFF;
+}
+
+/* 深色封面：深棕黑 + 提亮的印章红 */
+:root {
+  --d-bg: #14130F; --d-bg-2: #1D1B16;
+  --d-ink: #F2EFE7; --d-ink-2: #C9C4B6; --d-muted: #8A8577;
+  --d-rule: #35332B; --d-hairline: #26241E;
+  --d-accent: #E4735C; --d-accent-bg: #2A1A16;
+  --d-gain: #6FB08D; --d-gain-bg: #17251C;
+  --d-warn: #D9A441; --d-warn-bg: #26200F;
+  --d-on-accent: #14130F;
+}
