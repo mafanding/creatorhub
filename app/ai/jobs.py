@@ -19,7 +19,7 @@ from sqlmodel import select
 
 from ..db import get_session
 from ..models import AiBrand, AiDraft
-from . import catalog, prompts, render
+from . import catalog, prompts, render, sources
 from .client import AiError, channel_from_settings
 from .draft import Card, Draft, validate_draft
 from .writer import write_draft
@@ -87,6 +87,49 @@ def allowed_templates(brand: AiBrand | None) -> list[str]:
         return known
     kept = [str(n) for n in picked if str(n) in known]
     return kept or known
+
+
+def recent_source_keys(brand_id: int | None, limit: int = 6) -> list[str]:
+    """同一个人设最近几篇用掉的素材条目 id,**最近的排在前面**。
+
+    素材源按这个顺序做去重和见底兜底(见 sources/woolworths.py)。
+    超市特价一周才换一次,不排除的话七天会写出七篇几乎一样的东西。
+    """
+    if not brand_id:
+        return []
+    with get_session() as s:
+        rows = s.exec(
+            select(AiDraft)
+            .where(AiDraft.brand_id == brand_id)
+            .order_by(AiDraft.id.desc())
+            .limit(max(0, limit))
+        ).all()
+    keys: list[str] = []
+    for row in rows:
+        try:
+            got = json.loads(row.source_keys_json or "[]")
+        except json.JSONDecodeError:
+            continue
+        keys.extend(str(k) for k in got if str(k))
+    return list(dict.fromkeys(keys))
+
+
+async def pull_facts(brand: AiBrand, *, exclude: list[str] | None = None) -> sources.Facts:
+    """按人设配的素材源拉一次。没配源就抛错 —— 调用方该先判断。"""
+    if not (brand and (brand.facts_source or "").strip()):
+        raise AiError("这个人设没有配素材源")
+    try:
+        config = json.loads(brand.facts_config or "{}")
+    except json.JSONDecodeError as exc:
+        raise AiError(f"人设里的素材源配置不是合法 JSON:{exc}") from exc
+    if not isinstance(config, dict):
+        raise AiError("素材源配置要是一个 JSON 对象")
+    if exclude is None:
+        exclude = recent_source_keys(brand.id, brand.facts_dedup_drafts)
+    try:
+        return await sources.fetch(brand.facts_source, config, exclude=exclude)
+    except sources.SourceError as exc:
+        raise AiError(str(exc)) from exc
 
 
 def recent_titles(brand_id: int | None, limit: int = 12) -> list[str]:
@@ -161,6 +204,11 @@ async def _run(draft_id: int) -> None:
         if row is None:
             return
         brand = s.get(AiBrand, row.brand_id) if row.brand_id else None
+        # 出了 session 之后 SQLModel 对象就 detach 了,所以先把要用的字段拷出来。
+        brand_row = (
+            AiBrand(**{k: getattr(brand, k) for k in AiBrand.model_fields})
+            if brand is not None else None
+        )
         params = {
             "direction": row.direction,
             "facts": row.facts,
@@ -176,6 +224,20 @@ async def _run(draft_id: int) -> None:
         row.updated_at = datetime.utcnow()
         s.add(row)
         s.commit()
+
+    # 素材框空着而人设配了源:自动拉一次当天的真实数据。
+    # **人手填了就不动它** —— 手填优先于自动,不然人改半天会被无声覆盖。
+    if not params["facts"].strip() and brand_row is not None and brand_row.facts_source:
+        facts = await pull_facts(brand_row)
+        params["facts"] = facts.text
+        with get_session() as s:
+            row = s.get(AiDraft, draft_id)
+            if row is not None:
+                row.facts = facts.text
+                row.source_keys_json = json.dumps(facts.keys, ensure_ascii=False)
+                row.updated_at = datetime.utcnow()
+                s.add(row)
+                s.commit()
 
     channel = channel_from_settings()
     steps: list[str] = []

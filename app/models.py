@@ -702,6 +702,12 @@ class AiBrand(SQLModel, table=True):
     cards_min: int = 4
     cards_max: int = 7
     allowed_templates: str = ""        # JSON 数组;留空 = 全部模板都可用
+    # 素材源:每天自动把「今天的真实数据」拉回来填进素材框。留空 = 每次人工粘。
+    # 人每天手工去接口抄一遍价格,抄十天就会烦,烦了就会开始让模型自己发挥 ——
+    # 而那正是这套东西最不能出的事。见 app/ai/sources/。
+    facts_source: str = ""             # 源名字,见 app/ai/sources
+    facts_config: str = "{}"           # 该源的配置(JSON);留空的键用源自己的默认值
+    facts_dedup_drafts: int = 6        # 往前看几篇,把它们用过的条目排除掉
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -732,6 +738,9 @@ class AiDraft(SQLModel, table=True):
     model: str = ""                    # 实际用的通道:provider:model
     attempts: int = 0
     usage_json: str = "{}"
+    # 这一篇用掉的素材条目 id(商品 SKU 之类)。下一篇拉取时排除掉 ——
+    # 特价一周才换一次,不记这个的话七天会写出七篇几乎一样的东西。
+    source_keys_json: str = "[]"
     publish_task_id: Optional[int] = None   # 转成发布任务后回填
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

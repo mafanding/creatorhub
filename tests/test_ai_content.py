@@ -555,6 +555,51 @@ class AiApiTests(unittest.TestCase):
         asyncio.run(main.delete_ai_draft(did))
         self.assertFalse(jobs.draft_dir(did).exists())
 
+    def test_sources_endpoint_lists_the_woolworths_source(self):
+        rows = asyncio.run(main.list_ai_sources())
+        names = [r["name"] for r in rows]
+        self.assertIn("woolworths_nz_specials", names)
+        spec = next(r for r in rows if r["name"] == "woolworths_nz_specials")
+        self.assertIn("url", spec["default_config"])
+
+    def test_brand_round_trips_its_facts_source(self):
+        created = self._brand(facts_source="woolworths_nz_specials",
+                              facts_config={"pick": 2}, facts_dedup_drafts=9)
+        self.assertEqual(created["facts_source"], "woolworths_nz_specials")
+        self.assertEqual(created["facts_config"], {"pick": 2})
+        self.assertEqual(created["facts_dedup_drafts"], 9)
+
+    def test_brand_rejects_an_unknown_facts_source(self):
+        with self.assertRaises(main.HTTPException) as caught:
+            self._brand(facts_source="no-such-source")
+        self.assertEqual(caught.exception.status_code, 400)
+
+    def test_facts_pull_returns_the_text_without_saving_it(self):
+        brand = self._brand(facts_source="woolworths_nz_specials")
+
+        async def fake(b, *, exclude=None):
+            return jobs.sources.Facts(text="拉回来的素材", keys=["k"], note="ok")
+
+        with patch.object(main.ai_jobs, "pull_facts", fake):
+            out = asyncio.run(main.pull_ai_facts(
+                main.AiFactsPullIn(brand_id=brand["id"])))
+        self.assertEqual(out["facts"], "拉回来的素材")
+        self.assertEqual(out["keys"], ["k"])
+        self.assertEqual(asyncio.run(main.list_ai_drafts()), [])
+
+    def test_facts_pull_needs_a_source(self):
+        brand = self._brand()
+        with self.assertRaises(main.HTTPException) as caught:
+            asyncio.run(main.pull_ai_facts(main.AiFactsPullIn(brand_id=brand["id"])))
+        self.assertEqual(caught.exception.status_code, 400)
+
+    def test_create_draft_stores_the_pulled_source_keys(self):
+        brand = self._brand()
+        with patch.object(main.ai_jobs, "enqueue", return_value=True):
+            payload = asyncio.run(main.create_ai_draft(main.AiDraftIn(
+                brand_id=brand["id"], facts="贴好的素材", source_keys=["a", "b"])))
+        self.assertEqual(payload["source_keys"], ["a", "b"])
+
     def test_settings_round_trip_the_content_channel(self):
         out = asyncio.run(main.put_settings(main.SettingsIn(
             ai_content_provider="anthropic", ai_content_model="claude-opus-5",
@@ -625,6 +670,193 @@ class SweepInterruptedTests(unittest.TestCase):
         self.assertEqual(jobs.recent_titles(None), [])
 
 
+class WoolworthsSourceTests(unittest.TestCase):
+    # 素材源是这条链上唯一碰真实价格的地方 —— 抄错一个数,读者就白跑一趟。
+    def _payload(self, n=10):
+        items = []
+        for i in range(n):
+            pct = 50 - i * 5
+            items.append({
+                "type": "Product", "sku": f"sku{i}",
+                "name": f"chicken item {i}" if i % 3 == 0 else f"candy item {i}",
+                "brand": f"brand{i}",
+                "unit": "Each", "size": {"volumeSize": f"{100 + i}g"},
+                "images": {"big": f"https://cdn/x{i}.jpg?impolicy=p&w=200&h=200"},
+                "price": {"salePrice": 10 - i, "originalPrice": 20 - i,
+                          "savePercentage": pct, "savePrice": 10},
+            })
+        return {"products": {"items": items}}
+
+    def _fetch(self, payload=None, *, config=None, exclude=(), seed="t"):
+        from app.ai.sources import woolworths
+
+        class Resp:
+            status_code = 200
+            text = ""
+
+            def json(self):
+                return payload if payload is not None else self_payload
+
+        self_payload = self._payload()
+
+        class Client:
+            def __init__(self, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, url, headers=None):
+                Client.seen = {"url": url, "headers": headers or {}}
+                return Resp()
+
+        self.client = Client
+        with patch.object(woolworths.httpx, "AsyncClient", Client):
+            return asyncio.run(woolworths.fetch(
+                {**woolworths.DEFAULT_CONFIG, **(config or {})},
+                exclude=list(exclude), seed=seed))
+
+    def test_prices_are_copied_verbatim_and_images_upsized(self):
+        facts = self._fetch()
+        self.assertIn("$10.00", facts.text)      # salePrice 10 → 补两位小数
+        self.assertIn("50% OFF", facts.text)
+        self.assertIn("w=1200&h=1200", facts.text)
+        self.assertNotIn("w=200&h=200", facts.text)
+
+    def test_sends_the_header_that_the_api_needs(self):
+        self._fetch()
+        self.assertEqual(self.client.seen["headers"].get("x-requested-with"),
+                         "OnlineShopping.WebApp")
+
+    def test_picks_the_requested_count_and_reports_keys(self):
+        facts = self._fetch(config={"pick": 3})
+        self.assertEqual(len(facts.keys), 3)
+        self.assertEqual(len(set(facts.keys)), 3)
+
+    def test_excluded_skus_are_not_picked_again(self):
+        first = self._fetch(config={"pick": 2}, seed="a")
+        again = self._fetch(config={"pick": 2}, exclude=first.keys, seed="a")
+        self.assertFalse(set(first.keys) & set(again.keys))
+
+    def test_different_days_give_different_combinations(self):
+        combos = {tuple(sorted(self._fetch(config={"pick": 3}, seed=f"day{i}").keys))
+                  for i in range(8)}
+        # 特价一周才换一次;按折扣排序的话这里会只有 1 种组合
+        self.assertGreater(len(combos), 1)
+
+    def test_running_out_of_fresh_items_reuses_the_oldest_and_says_so(self):
+        every = [f"sku{i}" for i in range(10)]
+        facts = self._fetch(config={"pick": 3}, exclude=every)
+        self.assertEqual(len(facts.keys), 3)
+        self.assertIn("最近发过", facts.text)
+
+    def test_relaxes_the_threshold_when_the_week_is_thin_and_says_so(self):
+        payload = self._payload(2)          # 只有 50% 和 45% 两样
+        facts = self._fetch(payload, config={"pick": 3, "min_percent": 48})
+        self.assertIn("门槛已放宽", facts.text)
+
+    def test_same_brand_is_not_picked_twice(self):
+        payload = self._payload(6)
+        for it in payload["products"]["items"]:
+            it["brand"] = "同一个牌子"
+        facts = self._fetch(payload, config={"pick": 3})
+        self.assertEqual(len(facts.keys), 1)
+
+    def test_staple_keywords_pull_everyday_items_up(self):
+        # chicken 那几样折扣更浅,靠加权才上得来;跑多次看它出现的频率
+        hits = 0
+        for i in range(30):
+            facts = self._fetch(config={"pick": 1, "min_percent": 0}, seed=f"s{i}")
+            if any(k in ("sku0", "sku3", "sku6", "sku9") for k in facts.keys):
+                hits += 1
+        self.assertGreater(hits, 6, "日常品加权看起来没生效")
+
+    def test_items_without_a_price_are_dropped(self):
+        payload = self._payload(4)
+        payload["products"]["items"][0]["price"] = {}
+        facts = self._fetch(payload, config={"pick": 3, "min_percent": 0})
+        self.assertNotIn("sku0", facts.keys)
+
+    def test_http_error_becomes_a_readable_message(self):
+        from app.ai.sources import woolworths, SourceError
+
+        class Boom:
+            def __init__(self, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, url, headers=None):
+                raise woolworths.httpx.ConnectError("nope")
+
+        with patch.object(woolworths.httpx, "AsyncClient", Boom):
+            with self.assertRaises(SourceError) as caught:
+                asyncio.run(woolworths.fetch(woolworths.DEFAULT_CONFIG, exclude=[]))
+        self.assertIn("连不上", str(caught.exception))
+
+
+class FactsSourceWiringTests(unittest.TestCase):
+    def setUp(self):
+        self.previous_engine = db._engine
+        self.tmp = tempfile.TemporaryDirectory()
+        db.init_db(str(Path(self.tmp.name) / "facts.db"))
+
+    def tearDown(self):
+        if db._engine is not None:
+            db._engine.dispose()
+        db._engine = self.previous_engine
+        self.tmp.cleanup()
+
+    def test_recent_source_keys_are_newest_first_and_deduped(self):
+        with db.get_session() as s:
+            s.add(AiDraft(brand_id=1, source_keys_json=json.dumps(["a", "b"])))
+            s.add(AiDraft(brand_id=1, source_keys_json=json.dumps(["b", "c"])))
+            s.add(AiDraft(brand_id=2, source_keys_json=json.dumps(["z"])))
+            s.commit()
+        self.assertEqual(jobs.recent_source_keys(1), ["b", "c", "a"])
+        self.assertEqual(jobs.recent_source_keys(1, 1), ["b", "c"])
+        self.assertEqual(jobs.recent_source_keys(None), [])
+
+    def test_pull_facts_rejects_a_brand_without_a_source(self):
+        with self.assertRaises(client.AiError):
+            asyncio.run(jobs.pull_facts(AiBrand(name="x")))
+
+    def test_pull_facts_rejects_broken_config_json(self):
+        b = AiBrand(name="x", facts_source="woolworths_nz_specials",
+                    facts_config="{not json")
+        with self.assertRaises(client.AiError) as caught:
+            asyncio.run(jobs.pull_facts(b))
+        self.assertIn("JSON", str(caught.exception))
+
+    def test_pull_facts_passes_the_config_through(self):
+        seen = {}
+
+        async def fake(name, config, *, exclude, seed=None):
+            seen.update({"name": name, "config": config, "exclude": exclude})
+            return jobs.sources.Facts(text="素材", keys=["k1"], note="n")
+
+        b = AiBrand(id=9, name="x", facts_source="woolworths_nz_specials",
+                    facts_config=json.dumps({"pick": 2}), facts_dedup_drafts=3)
+        with patch.object(jobs.sources, "fetch", fake):
+            got = asyncio.run(jobs.pull_facts(b))
+        self.assertEqual(got.keys, ["k1"])
+        self.assertEqual(seen["config"], {"pick": 2})
+        self.assertEqual(seen["name"], "woolworths_nz_specials")
+
+    def test_unknown_source_is_a_readable_error(self):
+        b = AiBrand(name="x", facts_source="no-such-source")
+        with self.assertRaises(client.AiError) as caught:
+            asyncio.run(jobs.pull_facts(b))
+        self.assertIn("没有这个素材源", str(caught.exception))
+
+
 class RunDraftJobTests(unittest.TestCase):
     def setUp(self):
         self.previous_engine = db._engine
@@ -685,6 +917,75 @@ class RunDraftJobTests(unittest.TestCase):
             self.assertEqual(json.loads(row.usage_json), {"input": 5, "output": 7})
             self.assertEqual(row.model, "openai:m")
             self.assertIsNotNone(row.finished_at)
+
+    def test_empty_facts_are_auto_pulled_when_the_brand_has_a_source(self):
+        brand = AiBrand(name="小账本", cards_min=2, cards_max=3,
+                        facts_source="woolworths_nz_specials")
+        did = self._row(brand)
+        seen = {}
+
+        async def fake_pull(b, *, exclude=None):
+            seen["brand"] = b.name
+            return jobs.sources.Facts(text="今天鸡腿 $4.79", keys=["sku-x"], note="n")
+
+        async def fake_json(channel, system, user, history=None):
+            seen["prompt"] = user
+            return _good_draft().to_dict(), {"input": 1, "output": 1}
+
+        async def fake_render(cards, out_dir, **kw):
+            return self._fake_render(cards, out_dir, **kw)
+
+        with patch.object(jobs, "pull_facts", fake_pull), \
+             patch.object(writer, "complete_json", fake_json), \
+             patch.object(jobs.render, "render_cards", fake_render):
+            asyncio.run(jobs.run_draft_job(did))
+
+        self.assertEqual(seen["brand"], "小账本")
+        self.assertIn("今天鸡腿 $4.79", seen["prompt"])
+        with db.get_session() as s:
+            row = s.get(AiDraft, did)
+            self.assertEqual(row.facts, "今天鸡腿 $4.79")
+            # 用掉的条目要记下来,否则明天还会抽到同样的商品
+            self.assertEqual(json.loads(row.source_keys_json), ["sku-x"])
+
+    def test_hand_written_facts_are_never_overwritten_by_the_source(self):
+        brand = AiBrand(name="小账本", cards_min=2, cards_max=3,
+                        facts_source="woolworths_nz_specials")
+        did = self._row(brand)
+        with db.get_session() as s:
+            row = s.get(AiDraft, did)
+            row.facts = "我自己贴的素材"
+            s.add(row); s.commit()
+
+        async def boom(b, *, exclude=None):
+            raise AssertionError("手填了素材还去拉,会把人改的东西覆盖掉")
+
+        async def fake_json(channel, system, user, history=None):
+            return _good_draft().to_dict(), {"input": 1, "output": 1}
+
+        async def fake_render(cards, out_dir, **kw):
+            return self._fake_render(cards, out_dir, **kw)
+
+        with patch.object(jobs, "pull_facts", boom), \
+             patch.object(writer, "complete_json", fake_json), \
+             patch.object(jobs.render, "render_cards", fake_render):
+            asyncio.run(jobs.run_draft_job(did))
+        with db.get_session() as s:
+            self.assertEqual(s.get(AiDraft, did).facts, "我自己贴的素材")
+
+    def test_a_failing_source_fails_the_draft_with_its_reason(self):
+        brand = AiBrand(name="x", facts_source="woolworths_nz_specials")
+        did = self._row(brand)
+
+        async def boom(b, *, exclude=None):
+            raise client.AiError("连不上 Woolworths 特价接口")
+
+        with patch.object(jobs, "pull_facts", boom):
+            asyncio.run(jobs.run_draft_job(did))
+        with db.get_session() as s:
+            row = s.get(AiDraft, did)
+            self.assertEqual(row.status, jobs.STATUS_FAILED)
+            self.assertIn("Woolworths", row.error)
 
     def test_channel_failure_lands_on_the_row_as_a_readable_error(self):
         did = self._row()
